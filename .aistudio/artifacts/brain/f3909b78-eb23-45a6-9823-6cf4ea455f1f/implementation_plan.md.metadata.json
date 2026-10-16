@@ -1,0 +1,6 @@
+{
+  "summary": "Implementation plan for mapping Storage Access Framework (SAF) URI to all session file operations, ensuring files are read/written to the user-selected folder and enforcing SAF selection before photo operations.",
+  "updatedAt": "2026-10-16T11:12:03.203365049Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

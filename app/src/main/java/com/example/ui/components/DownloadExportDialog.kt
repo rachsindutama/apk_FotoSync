@@ -331,9 +331,15 @@ fun DownloadExportDialog(
                             safePhotos.forEachIndexed { idx, photo ->
                                 val entry = ZipEntry(photo.fileName)
                                 zos.putNextEntry(entry)
-                                val sourceFile = File(photo.localUri)
-                                if (sourceFile.exists() && sourceFile.isFile) {
-                                    sourceFile.inputStream().use { input ->
+                                val sourceInput = if (photo.localUri.startsWith("content://")) {
+                                    try { context.contentResolver.openInputStream(android.net.Uri.parse(photo.localUri)) } catch(e:Exception){null}
+                                } else {
+                                    val f = File(photo.localUri)
+                                    if (f.exists() && f.isFile) f.inputStream() else null
+                                }
+
+                                if (sourceInput != null) {
+                                    sourceInput.use { input ->
                                         input.copyTo(zos)
                                     }
                                 } else {

@@ -279,7 +279,7 @@ class KtorLocalServer(
     }
 
     private fun generateClientHtml(session: PhotoSessionEntity?, photos: List<PhotoItemEntity>): String {
-        val clientName = session?.clientName ?: "Klien Terhormat"
+        val clientName = session?.clientName ?: "Portal Klien"
         val folderName = session?.folderName ?: "Sesi Pemotretan"
         val sessionDate = session?.sessionDate ?: ""
 
@@ -643,17 +643,16 @@ class KtorLocalServer(
     <header>
         <div class="header-top">
             <div class="brand">
-                <span class="brand-badge">KTOR SERVER</span>
-                <span style="font-weight:600;font-size:13px;letter-spacing:0.5px;">PORTAL KLIEN</span>
+                <span class="brand-badge">FotoSync</span>
             </div>
             <div class="live-status">
                 <div class="live-dot"></div>
-                <span>Tersambung Ktor CIO</span>
+                <span>Tersambung</span>
             </div>
         </div>
         <div class="session-info">
             <h1 class="session-title">$clientName</h1>
-            <p class="session-subtitle">$folderName | $sessionDate</p>
+            <p class="session-subtitle">$folderName</p>
         </div>
     </header>
 

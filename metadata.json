@@ -1,6 +1,6 @@
 {
-  "name": "FotoSync Studio",
-  "description": "Alat seleksi dan sinkronisasi foto real-time untuk fotografer dan klien dengan web server lokal QR code, folder tanggal YYYY-MM-DD, dan pencadangan Google Drive.",
+  "name": "FotoSync",
+  "description": "Alat seleksi dan sinkronisasi foto real-time untuk fotografer dan klien dengan web server lokal (QR code)",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

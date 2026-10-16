@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -20,6 +21,7 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -43,7 +45,10 @@ import com.example.ui.theme.StudioGold
 fun SessionCard(
     session: PhotoSessionEntity,
     isSelected: Boolean,
+    isServerRunning: Boolean = false,
+    serverUrl: String? = null,
     onSelect: () -> Unit,
+    onToggleServer: () -> Unit,
     onDelete: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -141,19 +146,58 @@ fun SessionCard(
                             fontSize = 11.sp
                         )
                     }
+
+                    if (isServerRunning && !serverUrl.isNullOrEmpty()) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Server: $serverUrl",
+                            color = Color(0xFF34D399),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
             }
 
-            IconButton(
-                onClick = onDelete,
-                modifier = Modifier.size(36.dp)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Default.DeleteOutline,
-                    contentDescription = "Hapus Sesi",
-                    tint = Color(0xFF6B7280),
-                    modifier = Modifier.size(20.dp)
-                )
+                // Server / QR Toggle for this specific session
+                IconButton(
+                    onClick = onToggleServer,
+                    modifier = Modifier
+                        .background(
+                            if (isServerRunning) Color(0xFF064E3B) else Color(0xFF222630),
+                            CircleShape
+                        )
+                        .border(
+                            1.dp,
+                            if (isServerRunning) Color(0xFF10B981) else Color.Transparent,
+                            CircleShape
+                        )
+                        .size(36.dp)
+                        .testTag("session_server_btn_${session.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.QrCode,
+                        contentDescription = "Buka QR Klien Sesi Ini",
+                        tint = if (isServerRunning) Color(0xFF34D399) else StudioGold,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                IconButton(
+                    onClick = onDelete,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DeleteOutline,
+                        contentDescription = "Hapus Sesi",
+                        tint = Color(0xFF6B7280),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
         }
     }

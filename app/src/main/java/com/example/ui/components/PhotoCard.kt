@@ -69,8 +69,13 @@ fun PhotoCard(
         label = "borderColor"
     )
 
-    val imageFile = File(photo.localUri)
-    val hasValidFile = imageFile.exists() && imageFile.length() > 0
+    val imageModel: Any? = if (photo.localUri.startsWith("content://")) {
+        android.net.Uri.parse(photo.localUri)
+    } else if (photo.localUri.isNotEmpty()) {
+        val f = File(photo.localUri)
+        if (f.exists()) f else null
+    } else null
+    val hasValidFile = imageModel != null
 
     Card(
         modifier = modifier
@@ -92,9 +97,9 @@ fun PhotoCard(
                     .background(Color(0xFF0D0E13)),
                 contentAlignment = Alignment.Center
             ) {
-                if (hasValidFile) {
+                if (hasValidFile && imageModel != null) {
                     AsyncImage(
-                        model = imageFile,
+                        model = imageModel,
                         contentDescription = photo.fileName,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()

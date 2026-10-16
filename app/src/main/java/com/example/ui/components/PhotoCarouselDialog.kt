@@ -148,8 +148,13 @@ fun PhotoCarouselDialog(
                         .padding(vertical = 16.dp)
                 ) { page ->
                     val photo = photos[page]
-                    val imageFile = File(photo.localUri)
-                    val hasValidFile = imageFile.exists() && imageFile.length() > 0
+                    val imageModel: Any? = if (photo.localUri.startsWith("content://")) {
+                        android.net.Uri.parse(photo.localUri)
+                    } else if (photo.localUri.isNotEmpty()) {
+                        val f = File(photo.localUri)
+                        if (f.exists()) f else null
+                    } else null
+                    val hasValidFile = imageModel != null
 
                     Box(
                         modifier = Modifier
@@ -158,9 +163,9 @@ fun PhotoCarouselDialog(
                             .background(Color(0xFF14161C)),
                         contentAlignment = Alignment.Center
                     ) {
-                        if (hasValidFile) {
+                        if (hasValidFile && imageModel != null) {
                             AsyncImage(
-                                model = imageFile,
+                                model = imageModel,
                                 contentDescription = photo.fileName,
                                 contentScale = ContentScale.Fit,
                                 modifier = Modifier.fillMaxSize()
