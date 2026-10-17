@@ -56,5 +56,19 @@
 
 ---
 
+## Dukungan & Traktir Kopi
+
+Aplikasi **FotoSync** dikembangkan dengan penuh penasaran dan dedikasi oleh **Saya Sendiri**. Jika aplikasi ini bermanfaat untuk karya, bisnis, atau hobi Anda, Anda dapat mendukung pengembangan lebih lanjut dengan cara **Traktir Kopi** ☕ melalui ShopeePay atau QRIS nasional:
+
+| Platform | Keterangan |
+| :--- | :--- |
+| **Nama Pemilik** | Rachmad Sindu Pratama |
+| **Nomor ShopeePay** | `(+62) 82192222772` |
+| **Metode Pembayaran** | QRIS (Mendukung semua Bank & E-Wallet) |
+
+> **Terima kasih banyak atas dukungan, apresiasi, dan kebaikan Anda!**
+
+---
+
 ## Lisensi
 Hak Cipta © 2026 FotoSync.
