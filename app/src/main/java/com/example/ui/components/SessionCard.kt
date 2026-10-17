@@ -49,6 +49,7 @@ fun SessionCard(
     serverUrl: String? = null,
     onSelect: () -> Unit,
     onToggleServer: () -> Unit,
+    onOpenServerDialog: () -> Unit,
     onDelete: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -153,7 +154,10 @@ fun SessionCard(
                             text = "Server: $serverUrl",
                             color = Color(0xFF34D399),
                             fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier
+                                .clickable(onClick = onOpenServerDialog)
+                                .testTag("session_server_url_${session.id}")
                         )
                     }
                 }

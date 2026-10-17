@@ -62,6 +62,12 @@ interface FotoSyncDao {
     @Query("DELETE FROM photo_items WHERE id = :photoId")
     suspend fun deletePhoto(photoId: String)
 
+    @Query("DELETE FROM photo_items WHERE id IN (:photoIds)")
+    suspend fun deletePhotos(photoIds: List<String>)
+
+    @Query("UPDATE photo_items SET isPhotographerSelected = :isSelected WHERE sessionId = :sessionId")
+    suspend fun updateAllPhotographerSelected(sessionId: String, isSelected: Boolean)
+
     // --- Counters ---
     @Query("SELECT COUNT(*) FROM photo_items WHERE sessionId = :sessionId")
     fun getPhotoCount(sessionId: String): Flow<Int>

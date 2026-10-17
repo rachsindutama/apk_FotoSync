@@ -61,9 +61,7 @@ fun PhotoCard(
 ) {
     val borderColor by animateColorAsState(
         targetValue = when {
-            photo.isClientLiked && photo.isPhotographerSelected -> StudioGold.copy(alpha = 0.7f)
-            photo.isClientLiked -> CrimsonHeart.copy(alpha = 0.6f)
-            photo.isPhotographerSelected -> StudioGold.copy(alpha = 0.6f)
+            photo.isPhotographerSelected -> StudioGold.copy(alpha = 0.85f)
             else -> Color(0xFF222632)
         },
         label = "borderColor"

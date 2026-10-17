@@ -134,6 +134,14 @@ class FotoSyncRepository(
         dao.deletePhoto(photoId)
     }
 
+    suspend fun deletePhotos(photoIds: List<String>) = withContext(Dispatchers.IO) {
+        dao.deletePhotos(photoIds)
+    }
+
+    suspend fun updateAllPhotographerSelected(sessionId: String, isSelected: Boolean) = withContext(Dispatchers.IO) {
+        dao.updateAllPhotographerSelected(sessionId, isSelected)
+    }
+
     suspend fun deleteSession(sessionId: String) = withContext(Dispatchers.IO) {
         dao.deleteSession(sessionId)
     }

@@ -6,11 +6,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -39,6 +41,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -109,34 +112,31 @@ fun PhotoCarouselDialog(
                         )
                     }
 
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 8.dp)
+                    ) {
                         Text(
                             text = currentPhoto?.fileName ?: "Foto Studio",
                             color = Color.White,
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.Bold
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = "${pagerState.currentPage + 1} dari ${photos.size} • ${currentPhoto?.resolution ?: ""} • $fileSizeMb",
                             color = Color(0xFF9CA3AF),
-                            fontSize = 12.sp
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
-                    IconButton(
-                        onClick = {
-                            currentPhoto?.let { onDeletePhoto(it.id) }
-                        },
-                        modifier = Modifier
-                            .background(Color(0xFF3B1E22), CircleShape)
-                            .size(46.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.DeleteOutline,
-                            contentDescription = "Hapus Foto",
-                            tint = CrimsonHeart
-                        )
-                    }
+                    // Empty box to balance left close button
+                    Spacer(modifier = Modifier.size(46.dp))
                 }
 
                 // Horizontal Swipe Pager (Carousel)
@@ -248,33 +248,34 @@ fun PhotoCarouselDialog(
                                     modifier = Modifier.size(20.dp)
                                 )
                                 Text(
-                                    text = "  Unduh Foto Ini ($fileSizeMb)",
+                                    text = "  Unduh ($fileSizeMb)",
                                     color = Color.White,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 14.sp
                                 )
                             }
 
-                            // Photographer & Client Actions
+                            // Photographer, Client & Delete Actions
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Button(
                                     onClick = { onTogglePhotographerSelected(currentPhoto.id, !currentPhoto.isPhotographerSelected) },
                                     modifier = Modifier
                                         .weight(1f)
-                                        .height(44.dp),
-                                    shape = RoundedCornerShape(12.dp),
+                                        .height(42.dp),
+                                    shape = RoundedCornerShape(10.dp),
                                     colors = ButtonDefaults.buttonColors(
                                         containerColor = if (currentPhoto.isPhotographerSelected) StudioGold else Color(0xFF222634)
                                     )
                                 ) {
                                     Text(
-                                        text = if (currentPhoto.isPhotographerSelected) "Pilihan Fotografer" else "Tandai Pilihan",
+                                        text = if (currentPhoto.isPhotographerSelected) "Pilihan" else "Tandai",
                                         color = if (currentPhoto.isPhotographerSelected) Color(0xFF121316) else Color.White,
                                         fontWeight = FontWeight.SemiBold,
-                                        fontSize = 12.sp
+                                        fontSize = 11.sp,
+                                        maxLines = 1
                                     )
                                 }
 
@@ -282,17 +283,42 @@ fun PhotoCarouselDialog(
                                     onClick = { onToggleClientLiked(currentPhoto.id, !currentPhoto.isClientLiked) },
                                     modifier = Modifier
                                         .weight(1f)
-                                        .height(44.dp),
-                                    shape = RoundedCornerShape(12.dp),
+                                        .height(42.dp),
+                                    shape = RoundedCornerShape(10.dp),
                                     colors = ButtonDefaults.buttonColors(
                                         containerColor = if (currentPhoto.isClientLiked) CrimsonHeart else Color(0xFF222634)
                                     )
                                 ) {
                                     Text(
-                                        text = if (currentPhoto.isClientLiked) "Disukai Klien" else "Tandai Suka",
+                                        text = if (currentPhoto.isClientLiked) "Disukai" else "Suka",
                                         color = Color.White,
                                         fontWeight = FontWeight.SemiBold,
-                                        fontSize = 12.sp
+                                        fontSize = 11.sp,
+                                        maxLines = 1
+                                    )
+                                }
+
+                                Button(
+                                    onClick = { currentPhoto?.let { onDeletePhoto(it.id) } },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(42.dp),
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3B1E22))
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.DeleteOutline,
+                                        contentDescription = "Hapus",
+                                        tint = CrimsonHeart,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "Hapus",
+                                        color = CrimsonHeart,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 11.sp,
+                                        maxLines = 1
                                     )
                                 }
                             }

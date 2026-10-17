@@ -8,7 +8,12 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
+import android.os.FileObserver
+import android.os.Handler
+import android.os.Looper
+import android.database.ContentObserver
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -136,6 +141,9 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
     // Export logs for current session
     val exportLogs: StateFlow<List<ExportLogEntity>>
 
+    private val activeFileObservers: MutableList<FileObserver> = java.util.Collections.synchronizedList(mutableListOf())
+    private var activeContentObserver: ContentObserver? = null
+
     init {
         val database = FotoSyncDatabase.getInstance(application)
         repository = FotoSyncRepository(database.dao(), application)
@@ -170,11 +178,17 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
             }
         }
 
-        // Automatically scan and sync physical folder whenever active session changes
+        // Automatically observe and silently sync physical folder whenever active session changes
         viewModelScope.launch {
             _activeSessionId.collect { id ->
                 if (id != null) {
-                    syncSessionFolder(id)
+                    val session = repository.getSessionSync(id)
+                    if (session != null) {
+                        startObservingSession(session)
+                    }
+                    syncSessionFolder(id, silent = true)
+                } else {
+                    stopObservingSession()
                 }
             }
         }
@@ -365,6 +379,22 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun openSessionServerDialog(sessionId: String) {
+        val session = allSessions.value.find { it.id == sessionId }
+        if (session != null) {
+            selectSession(session.id)
+        }
+        val url = _sessionServerUrls.value[sessionId]
+        if (url != null) {
+            _serverUrl.value = url
+            _isServerRunning.value = true
+            ktorServer = sessionServers[sessionId]
+            _showServerDialog.value = true
+        } else {
+            toggleSessionServer(sessionId)
+        }
+    }
+
     fun closeServerDialog() {
         _showServerDialog.value = false
     }
@@ -386,11 +416,105 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
         return getSessionDirectory(session).absolutePath
     }
 
+    private fun startObservingSession(session: PhotoSessionEntity) {
+        stopObservingSession()
+
+        val dirsToWatch = mutableListOf<File>()
+        dirsToWatch.add(getSessionDirectory(session))
+        val publicPictures = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+            "FotoSync_Studio/${session.folderName}"
+        )
+        if (publicPictures.exists()) dirsToWatch.add(publicPictures)
+        val publicDcim = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+            "FotoSync_Studio/${session.folderName}"
+        )
+        if (publicDcim.exists()) dirsToWatch.add(publicDcim)
+
+        for (dir in dirsToWatch.distinctBy { it.absolutePath }) {
+            if (!dir.exists()) dir.mkdirs()
+            try {
+                val observer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    object : FileObserver(dir, CREATE or MOVED_TO or CLOSE_WRITE or DELETE) {
+                        override fun onEvent(event: Int, path: String?) {
+                            viewModelScope.launch(Dispatchers.IO) {
+                                delay(300L)
+                                syncSessionFolder(session.id, silent = true)
+                            }
+                        }
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    object : FileObserver(dir.absolutePath, CREATE or MOVED_TO or CLOSE_WRITE or DELETE) {
+                        override fun onEvent(event: Int, path: String?) {
+                            viewModelScope.launch(Dispatchers.IO) {
+                                delay(300L)
+                                syncSessionFolder(session.id, silent = true)
+                            }
+                        }
+                    }
+                }
+                observer.startWatching()
+                synchronized(activeFileObservers) {
+                    activeFileObservers.add(observer)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        val customUriStr = _customStorageUri.value
+        if (!customUriStr.isNullOrEmpty()) {
+            try {
+                val treeUri = Uri.parse(customUriStr)
+                val contentObs = object : ContentObserver(Handler(Looper.getMainLooper())) {
+                    override fun onChange(selfChange: Boolean, uri: Uri?) {
+                        viewModelScope.launch(Dispatchers.IO) {
+                            delay(500L)
+                            syncSessionFolder(session.id, silent = true)
+                        }
+                    }
+                }
+                getApplication<Application>().contentResolver.registerContentObserver(treeUri, true, contentObs)
+                activeContentObserver = contentObs
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    private fun stopObservingSession() {
+        try {
+            val toStop = synchronized(activeFileObservers) {
+                val copy = ArrayList(activeFileObservers)
+                activeFileObservers.clear()
+                copy
+            }
+            toStop.forEach {
+                try { it.stopWatching() } catch (_: Exception) { }
+            }
+        } catch (_: Exception) { }
+
+        try {
+            activeContentObserver?.let {
+                try {
+                    getApplication<Application>().contentResolver.unregisterContentObserver(it)
+                } catch (_: Exception) { }
+            }
+            activeContentObserver = null
+        } catch (_: Exception) { }
+    }
+
     /**
-     * Directly scans the physical storage folder (SAF or local) of the session for new photos.
+     * Directly scans the physical storage folder (SAF and local) of the session for new photos.
+     * Guarantees that photos copied from external apps (File Manager, Camera, Lightroom)
+     * are automatically detected and displayed in this app silently without UI blinking.
      */
-    suspend fun syncSessionFolder(sessionId: String): Int = withContext(Dispatchers.IO) {
-        _isScanningFolder.value = true
+    suspend fun syncSessionFolder(sessionId: String, silent: Boolean = true): Int = withContext(Dispatchers.IO) {
+        if (!silent) {
+            _isScanningFolder.value = true
+        }
         try {
             val session = repository.getSessionSync(sessionId) ?: return@withContext 0
             val existingPhotos = repository.getPhotosForSessionSync(sessionId)
@@ -398,32 +522,54 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
             val existingNames = existingPhotos.map { it.fileName.lowercase() }.toSet()
             val newPhotos = mutableListOf<PhotoItemEntity>()
             val contentResolver = getApplication<Application>().contentResolver
+            val supportedExtensions = setOf(
+                "jpg", "jpeg", "png", "webp", "dng", "heic", "heif",
+                "raw", "cr2", "cr3", "nef", "arw", "rw2", "orf"
+            )
 
+            // 1. Scan SAF directories if user configured custom storage
             val customUriStr = _customStorageUri.value
             if (!customUriStr.isNullOrEmpty()) {
                 try {
                     val treeUri = Uri.parse(customUriStr)
                     val pickedDir = androidx.documentfile.provider.DocumentFile.fromTreeUri(getApplication(), treeUri)
-                    if (pickedDir != null) {
-                        val studioSubDir = pickedDir.findFile("FotoSync_Studio") ?: pickedDir
-                        val sessionSubDir = studioSubDir.findFile(session.folderName)
-                        if (sessionSubDir != null) {
-                            val filesOnDisk = sessionSubDir.listFiles()
+                    if (pickedDir != null && pickedDir.exists()) {
+                        val candidateSafDirs = mutableListOf<androidx.documentfile.provider.DocumentFile>()
+                        
+                        // Check FotoSync_Studio/<session.folderName>
+                        pickedDir.findFile("FotoSync_Studio")?.findFile(session.folderName)?.let { candidateSafDirs.add(it) }
+                        // Check direct <session.folderName>
+                        pickedDir.findFile(session.folderName)?.let { candidateSafDirs.add(it) }
+                        // Check pickedDir itself if it contains images or is named similarly
+                        if (pickedDir.name.equals(session.folderName, ignoreCase = true) || candidateSafDirs.isEmpty()) {
+                            candidateSafDirs.add(pickedDir)
+                        }
+
+                        for (dir in candidateSafDirs.distinctBy { it.uri.toString() }) {
+                            val filesOnDisk = dir.listFiles()
                             for (docFile in filesOnDisk) {
                                 if (docFile.isFile) {
-                                    val fileName = docFile.name ?: "photo.jpg"
+                                    val fileName = docFile.name ?: "photo_${System.currentTimeMillis()}.jpg"
+                                    val ext = fileName.substringAfterLast('.', "").lowercase()
+                                    val isImageMime = docFile.type?.startsWith("image/") == true
+                                    if (!isImageMime && ext !in supportedExtensions) continue
+
                                     val fileUriStr = docFile.uri.toString()
                                     if (fileUriStr in existingPaths || fileName.lowercase() in existingNames) continue
 
                                     val fileSize = docFile.length().coerceAtLeast(1024L)
                                     val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                                    contentResolver.openInputStream(docFile.uri)?.use { stream ->
-                                        BitmapFactory.decodeStream(stream, null, options)
+                                    try {
+                                        contentResolver.openInputStream(docFile.uri)?.use { stream ->
+                                            BitmapFactory.decodeStream(stream, null, options)
+                                        }
+                                    } catch (e: Exception) {
+                                        // Ignore preview decode failure for RAW
                                     }
                                     val resolution = if (options.outWidth > 0 && options.outHeight > 0) {
                                         "${options.outWidth} x ${options.outHeight}"
                                     } else {
-                                        "4000 x 3000"
+                                        "6000 x 4000"
                                     }
 
                                     newPhotos.add(
@@ -437,7 +583,7 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
                                             isClientLiked = false,
                                             isPhotographerSelected = false,
                                             rating = 0,
-                                            capturedAt = docFile.lastModified()
+                                            capturedAt = docFile.lastModified().takeIf { it > 0 } ?: System.currentTimeMillis()
                                         )
                                     )
                                 }
@@ -447,10 +593,21 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
-            } else {
-                val sessionDir = getSessionDirectory(session)
-                val supportedExtensions = setOf("jpg", "jpeg", "png", "webp", "dng", "heic", "raw", "cr2", "nef")
-                val filesOnDisk = sessionDir.listFiles { file ->
+            }
+
+            // 2. Scan standard local directories (both app external files and public Pictures/DCIM)
+            val candidateLocalDirs = mutableListOf<File>()
+            candidateLocalDirs.add(getSessionDirectory(session))
+            
+            val publicPictures = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "FotoSync_Studio/${session.folderName}")
+            if (publicPictures.exists()) candidateLocalDirs.add(publicPictures)
+            
+            val publicDcim = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), "FotoSync_Studio/${session.folderName}")
+            if (publicDcim.exists()) candidateLocalDirs.add(publicDcim)
+
+            for (dir in candidateLocalDirs.distinctBy { it.absolutePath }) {
+                if (!dir.exists() || !dir.isDirectory) continue
+                val filesOnDisk = dir.listFiles { file ->
                     file.isFile && file.extension.lowercase() in supportedExtensions
                 } ?: emptyArray()
 
@@ -461,11 +618,15 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
 
                     val fileSize = file.length().coerceAtLeast(1024L)
                     val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    BitmapFactory.decodeFile(file.absolutePath, options)
+                    try {
+                        BitmapFactory.decodeFile(file.absolutePath, options)
+                    } catch (e: Exception) {
+                        // Ignore
+                    }
                     val resolution = if (options.outWidth > 0 && options.outHeight > 0) {
                         "${options.outWidth} x ${options.outHeight}"
                     } else {
-                        "4000 x 3000"
+                        "6000 x 4000"
                     }
 
                     newPhotos.add(
@@ -479,7 +640,7 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
                             isClientLiked = false,
                             isPhotographerSelected = false,
                             rating = 0,
-                            capturedAt = file.lastModified()
+                            capturedAt = file.lastModified().takeIf { it > 0 } ?: System.currentTimeMillis()
                         )
                     )
                 }
@@ -493,13 +654,15 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
             e.printStackTrace()
             0
         } finally {
-            _isScanningFolder.value = false
+            if (!silent) {
+                _isScanningFolder.value = false
+            }
         }
     }
 
-    fun triggerManualFolderSync(sessionId: String, onResult: (newCount: Int) -> Unit) {
+    fun triggerManualFolderSync(sessionId: String, onResult: (newCount: Int) -> Unit = {}) {
         viewModelScope.launch {
-            val count = syncSessionFolder(sessionId)
+            val count = syncSessionFolder(sessionId, silent = true)
             withContext(Dispatchers.Main) {
                 onResult(count)
             }
@@ -508,8 +671,89 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
 
     fun selectSession(sessionId: String) {
         _activeSessionId.value = sessionId
+    }
+
+    fun selectAllPhotographerMarked(selectAll: Boolean) {
+        val sessionId = _activeSessionId.value ?: return
         viewModelScope.launch {
-            syncSessionFolder(sessionId)
+            repository.updateAllPhotographerSelected(sessionId, selectAll)
+        }
+    }
+
+    /**
+     * Deletes all photos marked by photographer/admin permanently from both physical storage and database.
+     */
+    fun deleteSelectedPhotosFromStorage(context: Context, onComplete: (count: Int) -> Unit = {}) {
+        val currentSessionId = _activeSessionId.value ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            val allPhotos = repository.getPhotosForSessionSync(currentSessionId)
+            val selectedPhotos = allPhotos.filter { it.isPhotographerSelected }
+            if (selectedPhotos.isEmpty()) {
+                withContext(Dispatchers.Main) { onComplete(0) }
+                return@launch
+            }
+
+            val contentResolver = context.contentResolver
+            for (photo in selectedPhotos) {
+                try {
+                    if (photo.localUri.startsWith("content://")) {
+                        val uri = Uri.parse(photo.localUri)
+                        val doc = androidx.documentfile.provider.DocumentFile.fromSingleUri(context, uri)
+                        if (doc != null && doc.exists()) {
+                            doc.delete()
+                        } else {
+                            try { contentResolver.delete(uri, null, null) } catch (e: Exception) { }
+                        }
+                    } else if (photo.localUri.isNotEmpty()) {
+                        val path = if (photo.localUri.startsWith("file://")) photo.localUri.removePrefix("file://") else photo.localUri
+                        val f = File(path)
+                        if (f.exists()) f.delete()
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+
+            val photoIds = selectedPhotos.map { it.id }
+            repository.deletePhotos(photoIds)
+
+            if (_selectedPhotoForDetail.value?.id in photoIds) {
+                _selectedPhotoForDetail.value = null
+            }
+
+            withContext(Dispatchers.Main) {
+                onComplete(selectedPhotos.size)
+            }
+        }
+    }
+
+    fun deletePhotoFromStorage(context: Context, photo: PhotoItemEntity, onComplete: () -> Unit = {}) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (photo.localUri.startsWith("content://")) {
+                    val uri = Uri.parse(photo.localUri)
+                    val doc = androidx.documentfile.provider.DocumentFile.fromSingleUri(context, uri)
+                    if (doc != null && doc.exists()) {
+                        doc.delete()
+                    } else {
+                        try { context.contentResolver.delete(uri, null, null) } catch (e: Exception) { }
+                    }
+                } else if (photo.localUri.isNotEmpty()) {
+                    val path = if (photo.localUri.startsWith("file://")) photo.localUri.removePrefix("file://") else photo.localUri
+                    val f = File(path)
+                    if (f.exists()) f.delete()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+
+            repository.deletePhoto(photo.id)
+            if (_selectedPhotoForDetail.value?.id == photo.id) {
+                _selectedPhotoForDetail.value = null
+            }
+            withContext(Dispatchers.Main) {
+                onComplete()
+            }
         }
     }
 
@@ -557,10 +801,90 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun deleteSession(sessionId: String) {
-        viewModelScope.launch {
-            repository.deleteSession(sessionId)
-            if (_activeSessionId.value == sessionId) {
-                _activeSessionId.value = allSessions.value.firstOrNull { it.id != sessionId }?.id
+        val context = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val session = repository.getSessionSync(sessionId)
+                if (session != null) {
+                    val photos = repository.getPhotosForSessionSync(sessionId)
+                    val contentResolver = context.contentResolver
+
+                    // 1. Delete individual photo files from storage
+                    for (photo in photos) {
+                        try {
+                            if (photo.localUri.startsWith("content://")) {
+                                val uri = Uri.parse(photo.localUri)
+                                val doc = androidx.documentfile.provider.DocumentFile.fromSingleUri(context, uri)
+                                if (doc != null && doc.exists()) {
+                                    doc.delete()
+                                } else {
+                                    try { contentResolver.delete(uri, null, null) } catch (e: Exception) { }
+                                }
+                            } else if (photo.localUri.isNotEmpty()) {
+                                val path = if (photo.localUri.startsWith("file://")) photo.localUri.removePrefix("file://") else photo.localUri
+                                val f = File(path)
+                                if (f.exists()) f.delete()
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+
+                    // 2. Delete local session directories recursively
+                    try {
+                        val sessionDir = getSessionDirectory(session)
+                        if (sessionDir.exists()) {
+                            sessionDir.deleteRecursively()
+                        }
+
+                        val publicPictures = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "FotoSync_Studio/${session.folderName}")
+                        if (publicPictures.exists()) {
+                            publicPictures.deleteRecursively()
+                        }
+
+                        val publicDcim = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), "FotoSync_Studio/${session.folderName}")
+                        if (publicDcim.exists()) {
+                            publicDcim.deleteRecursively()
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+
+                    // 3. Delete SAF folder if configured
+                    val customUriStr = _customStorageUri.value
+                    if (!customUriStr.isNullOrEmpty()) {
+                        try {
+                            val treeUri = Uri.parse(customUriStr)
+                            val pickedDir = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, treeUri)
+                            if (pickedDir != null && pickedDir.exists()) {
+                                pickedDir.findFile("FotoSync_Studio")?.findFile(session.folderName)?.let { it.delete() }
+                                pickedDir.findFile(session.folderName)?.let { it.delete() }
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+
+                    // 4. Delete photos from DB
+                    val photoIds = photos.map { it.id }
+                    if (photoIds.isNotEmpty()) {
+                        repository.deletePhotos(photoIds)
+                    }
+                }
+
+                repository.deleteSession(sessionId)
+
+                withContext(Dispatchers.Main) {
+                    if (_activeSessionId.value == sessionId) {
+                        _activeSessionId.value = allSessions.value.firstOrNull { it.id != sessionId }?.id
+                    }
+                    Toast.makeText(context, "Sesi dan file penyimpanan berhasil dihapus", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Gagal menghapus sesi: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                }
             }
         }
     }
@@ -908,6 +1232,7 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
 
     override fun onCleared() {
         super.onCleared()
+        stopObservingSession()
         ktorServer?.stop()
     }
 }

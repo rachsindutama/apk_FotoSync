@@ -46,6 +46,7 @@ import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FilterList
@@ -56,6 +57,7 @@ import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -71,6 +73,9 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -132,13 +137,20 @@ fun FotoSyncApp(
     val selectedPhotoForDetail by viewModel.selectedPhotoForDetail.collectAsState()
     val backupState by viewModel.backupState.collectAsState()
     val exportLogs by viewModel.exportLogs.collectAsState()
-    val isScanningFolder by viewModel.isScanningFolder.collectAsState()
 
     val searchQuery by viewModel.searchQuery.collectAsState()
 
     var activeMainTab by remember { mutableIntStateOf(0) } // 0: Galeri Foto, 1: Folder Sesi
     var showDownloadDialog by remember { mutableStateOf(false) }
     var isSpeedDialOpen by remember { mutableStateOf(false) }
+    var showDeleteConfirmDialog by remember { mutableStateOf(false) }
+
+    // Automatically sync storage folder whenever user returns to the app from other apps
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        activeSession?.let { session ->
+            viewModel.triggerManualFolderSync(session.id) {}
+        }
+    }
 
     // Close speed dial on system back gesture
     BackHandler(enabled = isSpeedDialOpen) {
@@ -179,10 +191,98 @@ fun FotoSyncApp(
         containerColor = DarkroomBase,
         topBar = {
             TopStudioHeader(
-                activeSessionName = activeSession?.folderName ?: "Aplikasi seleksi dan sinkronisasi foto real-time",
-                clientName = activeSession?.clientName ?: "Pilih Sesi",
-                isServerRunning = isServerRunning
+                activeSession = activeSession,
+                isServerRunning = isServerRunning,
+                onOpenDownload = { showDownloadDialog = true }
             )
+        },
+        bottomBar = {
+            AnimatedVisibility(
+                visible = activeMainTab == 0 && photographerPickCount > 0,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
+            ) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .testTag("selection_sticky_action_bar"),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E222D)),
+                    border = androidx.compose.foundation.BorderStroke(1.5.dp, StudioGold.copy(alpha = 0.7f)),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        // Left side: count badge and select all
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .background(StudioGold, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "$photographerPickCount",
+                                    color = Color(0xFF121316),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Text(
+                                text = "Ditandai",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+
+                            val allSelected = totalPhotos > 0 && photographerPickCount == totalPhotos
+                            TextButton(
+                                onClick = { viewModel.selectAllPhotographerMarked(!allSelected) },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = if (allSelected) "Lepas Semua" else "Pilih Semua",
+                                    color = StudioGold,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        // Right side: Delete from storage button
+                        Button(
+                            onClick = { showDeleteConfirmDialog = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = CrimsonHeart),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                            modifier = Modifier.testTag("delete_selected_storage_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Hapus File",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
         },
         floatingActionButton = {
             SpeedDialFab(
@@ -199,10 +299,6 @@ fun FotoSyncApp(
                     isSpeedDialOpen = false
                     viewModel.openServerDialog()
                 },
-                onOpenBackup = {
-                    isSpeedDialOpen = false
-                    viewModel.openBackupDialog()
-                },
                 onOpenDownload = {
                     isSpeedDialOpen = false
                     showDownloadDialog = true
@@ -216,20 +312,6 @@ fun FotoSyncApp(
                     photoPickerLauncher.launch(
                         PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                     )
-                },
-                onSyncFolder = {
-                    isSpeedDialOpen = false
-                    activeSession?.let { session ->
-                        viewModel.triggerManualFolderSync(session.id) { count ->
-                            if (count > 0) {
-                                Toast.makeText(context, "$count berkas baru disinkronkan dari folder fisik!", Toast.LENGTH_SHORT).show()
-                            } else {
-                                Toast.makeText(context, "Folder sudah tersinkronkan (tidak ada berkas baru)", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    } ?: run {
-                        Toast.makeText(context, "Pilih atau buat sesi terlebih dahulu", Toast.LENGTH_SHORT).show()
-                    }
                 }
             )
         }
@@ -362,25 +444,7 @@ fun FotoSyncApp(
                             }
                         }
                     },
-                    onOpenAddSession = { viewModel.openAddSessionDialog() },
-                    onOpenDownload = { showDownloadDialog = true },
-                    onImportPhotos = {
-                        photoPickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                        )
-                    },
-                    onSyncFolder = {
-                        activeSession?.let { session ->
-                            viewModel.triggerManualFolderSync(session.id) { count ->
-                                if (count > 0) {
-                                    Toast.makeText(context, "$count berkas baru disinkronkan dari folder!", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    Toast.makeText(context, "Folder sudah tersinkronkan (tidak ada berkas baru)", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        }
-                    },
-                    isScanningFolder = isScanningFolder
+                    onOpenAddSession = { viewModel.openAddSessionDialog() }
                 )
             } else {
                 // SESSIONS & DATE FOLDERS VIEW
@@ -395,6 +459,9 @@ fun FotoSyncApp(
                     },
                     onToggleServer = { id ->
                         viewModel.toggleSessionServer(id)
+                    },
+                    onOpenServerDialog = { id ->
+                        viewModel.openSessionServerDialog(id)
                     },
                     onDeleteSession = { id -> viewModel.deleteSession(id) },
                     onOpenAddSession = { viewModel.openAddSessionDialog() }
@@ -418,6 +485,56 @@ fun FotoSyncApp(
         }
     }
 }
+
+    // Delete Confirmation Dialog for marked photos
+    if (showDeleteConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirmDialog = false },
+            containerColor = DarkroomSurface,
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = null,
+                    tint = CrimsonHeart,
+                    modifier = Modifier.size(32.dp)
+                )
+            },
+            title = {
+                Text(
+                    text = "Hapus $photographerPickCount File dari Penyimpanan?",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+            },
+            text = {
+                Text(
+                    text = "Foto yang Anda tandai akan dihapus secara permanen dari penyimpanan fisik perangkat dan sesi foto ini. Tindakan ini tidak dapat dibatalkan.",
+                    color = Color(0xFFD1D5DB),
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDeleteConfirmDialog = false
+                        viewModel.deleteSelectedPhotosFromStorage(context) { count ->
+                            Toast.makeText(context, "$count file berhasil dihapus permanen dari penyimpanan!", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = CrimsonHeart),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Hapus Permanen", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirmDialog = false }) {
+                    Text("Batal", color = Color(0xFF9CA3AF))
+                }
+            }
+        )
+    }
 
     // Modal Dialogs
     if (showDownloadDialog) {
@@ -467,7 +584,16 @@ fun FotoSyncApp(
             onToggleClientLiked = { id, cur -> viewModel.toggleClientLiked(id, cur) },
             onTogglePhotographerSelected = { id, cur -> viewModel.togglePhotographerSelected(id, cur) },
             onUpdateRating = { id, rating -> viewModel.updatePhotoRating(id, rating) },
-            onDeletePhoto = { id -> viewModel.deletePhoto(id) },
+            onDeletePhoto = { id ->
+                val targetPhoto = filteredPhotos.find { it.id == id }
+                if (targetPhoto != null) {
+                    viewModel.deletePhotoFromStorage(context, targetPhoto) {
+                        Toast.makeText(context, "Foto ${targetPhoto.fileName} dihapus dari penyimpanan", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    viewModel.deletePhoto(id)
+                }
+            },
             onDownloadPhoto = { photo ->
                 scope.launch {
                     val file = viewModel.downloadPhotoToDevice(context, photo)
@@ -484,16 +610,16 @@ fun FotoSyncApp(
 
 @Composable
 fun TopStudioHeader(
-    activeSessionName: String,
-    clientName: String,
-    isServerRunning: Boolean = false
+    activeSession: com.example.data.model.PhotoSessionEntity?,
+    isServerRunning: Boolean = false,
+    onOpenDownload: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(DarkroomSurface)
             .border(1.dp, Color(0xFF2C3240))
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
@@ -543,37 +669,50 @@ fun TopStudioHeader(
                         )
                     }
                 }
+                // Nama folder tepat di bawah title brand (tanpa ikon folder, kontras rendah)
                 Text(
-                    text = if (clientName.isNotEmpty() && clientName != "Pilih Sesi") clientName else activeSessionName,
+                    text = activeSession?.folderName ?: "Belum ada sesi",
                     color = Color(0xFF9CA3AF),
-                    fontSize = 12.sp,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Normal,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 2.dp)
                 )
             }
         }
 
-        // Live Server Status Indicator (No buttons in header)
-        if (isServerRunning) {
-            Box(
-                modifier = Modifier
-                    .background(Color(0xFF064E3B), RoundedCornerShape(20.dp))
-                    .border(1.dp, Color(0xFF10B981), RoundedCornerShape(20.dp))
-                    .padding(horizontal = 10.dp, vertical = 5.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .background(Color(0xFF34D399), CircleShape)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "QR Aktif",
-                        color = Color(0xFF34D399),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+        // Right side: QR status indicator and Download button
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+
+            // Tombol Unduh di kanan atas
+            if (activeSession != null) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(CobaltBlue)
+                        .clickable(onClick = onOpenDownload)
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .testTag("top_bar_download_btn")
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = "Unduh File",
+                            tint = Color.White,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = "Unduh",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
         }
@@ -589,11 +728,9 @@ fun SpeedDialFab(
     hasActiveSession: Boolean,
     onOpenAddSession: () -> Unit,
     onOpenServer: () -> Unit,
-    onOpenBackup: () -> Unit,
     onOpenDownload: () -> Unit,
     onSelectStorageFolder: () -> Unit,
-    onImportPhotos: () -> Unit,
-    onSyncFolder: () -> Unit
+    onImportPhotos: () -> Unit
 ) {
     val rotation by animateFloatAsState(
         targetValue = if (isExpanded) 45f else 0f,
@@ -613,26 +750,6 @@ fun SpeedDialFab(
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // 1. QR Portal Klien
-                SpeedDialActionItem(
-                    label = if (isServerRunning) "QR Klien Aktif (Buka)" else "Buka QR Portal Klien",
-                    icon = Icons.Default.QrCode,
-                    containerColor = if (isServerRunning) CrimsonHeart else Color(0xFF10B981),
-                    badgeText = if (likesCount > 0) "$likesCount like" else null,
-                    testTag = "speed_dial_qr_portal",
-                    onClick = onOpenServer
-                )
-
-                // 2. Pindai Berkas Folder Fisik (Tersedia jika ada sesi aktif)
-                if (hasActiveSession) {
-                    SpeedDialActionItem(
-                        label = "Pindai File Folder Fisik",
-                        icon = Icons.Default.Refresh,
-                        containerColor = Color(0xFF059669),
-                        testTag = "speed_dial_sync_folder",
-                        onClick = onSyncFolder
-                    )
-                }
 
                 // 3. Impor Foto (tersedia jika ada sesi aktif)
                 if (hasActiveSession) {
@@ -661,15 +778,6 @@ fun SpeedDialFab(
                     containerColor = Color(0xFFD97706),
                     testTag = "speed_dial_storage_folder",
                     onClick = onSelectStorageFolder
-                )
-
-                // 5. Cadangan Google Drive
-                SpeedDialActionItem(
-                    label = "Cadangan Google Drive",
-                    icon = Icons.Default.CloudUpload,
-                    containerColor = CobaltBlue,
-                    testTag = "speed_dial_google_drive",
-                    onClick = onOpenBackup
                 )
 
                 // 6. Buat Sesi Baru
@@ -786,17 +894,13 @@ fun PhotoGallerySection(
     totalPhotos: Int,
     clientLikedCount: Int,
     photographerPickCount: Int,
-    isScanningFolder: Boolean = false,
     onSetFilter: (PhotoFilter) -> Unit,
     onSearchQueryChanged: (String) -> Unit,
     onPhotoClick: (com.example.data.model.PhotoItemEntity) -> Unit,
     onToggleClientLike: (String, Boolean) -> Unit,
     onTogglePhotographerSelect: (String, Boolean) -> Unit,
     onDownloadPhoto: (com.example.data.model.PhotoItemEntity) -> Unit,
-    onOpenAddSession: () -> Unit,
-    onOpenDownload: () -> Unit,
-    onImportPhotos: () -> Unit,
-    onSyncFolder: () -> Unit
+    onOpenAddSession: () -> Unit
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         if (activeSession == null) {
@@ -838,129 +942,6 @@ fun PhotoGallerySection(
                 }
             }
             return
-        }
-
-        // Active Session Subtitle Bar with Direct Download & Sync Action
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0xFF14161C))
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Folder,
-                    contentDescription = null,
-                    tint = StudioGold,
-                    modifier = Modifier.size(16.dp)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = activeSession.folderName,
-                    color = Color(0xFFE5E7EB),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text(
-                    text = "${photos.size} foto",
-                    color = StudioGold,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold
-                )
-
-                // Sync / Scan Physical Folder Action
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFF222630))
-                        .border(1.dp, StudioGold.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
-                        .clickable(onClick = onSyncFolder)
-                        .padding(horizontal = 9.dp, vertical = 5.dp)
-                        .testTag("gallery_sync_folder_btn")
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = null,
-                            tint = StudioGold,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = if (isScanningFolder) "Memindai..." else "Pindai Folder",
-                            color = StudioGold,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-
-                // Import Photos Action
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFF222630))
-                        .border(1.dp, Color(0xFF374151), RoundedCornerShape(8.dp))
-                        .clickable(onClick = onImportPhotos)
-                        .padding(horizontal = 9.dp, vertical = 5.dp)
-                        .testTag("gallery_import_btn")
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.AddPhotoAlternate,
-                            contentDescription = null,
-                            tint = Color(0xFF9CA3AF),
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = "Impor",
-                            color = Color(0xFFD1D5DB),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-                }
-
-                // Prominent Download Button in Gallery Header
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(CobaltBlue)
-                        .clickable(onClick = onOpenDownload)
-                        .padding(horizontal = 9.dp, vertical = 5.dp)
-                        .testTag("gallery_download_btn")
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Download,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = "Unduh File",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
         }
 
         // Filter Chips Row (Semua, Disukai Klien, Pilihan Fotografer, Belum Direview)
@@ -1027,36 +1008,11 @@ fun PhotoGallerySection(
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "Taruh berkas foto langsung ke folder /Pictures/FotoSync_Studio/${activeSession.folderName} lalu klik 'Pindai Folder', atau impor langsung dari galeri.",
+                        text = "Foto yang Anda salin langsung ke folder penyimpanan dari aplikasi lain akan otomatis langsung dibaca dan muncul di sini.",
                         color = Color(0xFF9CA3AF),
                         fontSize = 12.sp,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Button(
-                            onClick = onSyncFolder,
-                            colors = ButtonDefaults.buttonColors(containerColor = StudioGold),
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier.testTag("empty_sync_folder_btn")
-                        ) {
-                            Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFF121316))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(if (isScanningFolder) "Memindai..." else "Pindai Folder", color = Color(0xFF121316), fontWeight = FontWeight.Bold)
-                        }
-
-                        Button(
-                            onClick = onImportPhotos,
-                            colors = ButtonDefaults.buttonColors(containerColor = CobaltBlue),
-                            shape = RoundedCornerShape(10.dp)
-                        ) {
-                            Icon(imageVector = Icons.Default.AddPhotoAlternate, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Impor Galeri", color = Color.White)
-                        }
-                    }
                 }
             }
         } else {
@@ -1121,9 +1077,12 @@ fun SessionsListSection(
     sessionServerUrls: Map<String, String>,
     onSelectSession: (String) -> Unit,
     onToggleServer: (String) -> Unit,
+    onOpenServerDialog: (String) -> Unit,
     onDeleteSession: (String) -> Unit,
     onOpenAddSession: () -> Unit
 ) {
+    var sessionToDelete by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<com.example.data.model.PhotoSessionEntity?>(null) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1212,10 +1171,60 @@ fun SessionsListSection(
                         serverUrl = url,
                         onSelect = { onSelectSession(session.id) },
                         onToggleServer = { onToggleServer(session.id) },
-                        onDelete = { onDeleteSession(session.id) }
+                        onOpenServerDialog = { onOpenServerDialog(session.id) },
+                        onDelete = { sessionToDelete = session }
                     )
                 }
             }
         }
+    }
+
+    if (sessionToDelete != null) {
+        val s = sessionToDelete!!
+        AlertDialog(
+            onDismissRequest = { sessionToDelete = null },
+            containerColor = DarkroomSurface,
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = null,
+                    tint = CrimsonHeart,
+                    modifier = Modifier.size(32.dp)
+                )
+            },
+            title = {
+                Text(
+                    text = "Hapus Sesi \"${s.clientName}\"?",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+            },
+            text = {
+                Text(
+                    text = "Sesi ini beserta seluruh file foto di penyimpanan fisik perangkat (${s.folderName}) akan dihapus secara permanen. Tindakan ini tidak dapat dibatalkan.",
+                    color = Color(0xFFD1D5DB),
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val id = s.id
+                        sessionToDelete = null
+                        onDeleteSession(id)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = CrimsonHeart),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Hapus Permanen", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { sessionToDelete = null }) {
+                    Text("Batal", color = Color(0xFF9CA3AF))
+                }
+            }
+        )
     }
 }
