@@ -48,6 +48,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.GuestSummary
 import com.example.data.model.PhotoItemEntity
 import com.example.data.model.PhotoSessionEntity
 import com.example.ui.theme.CobaltBlue
@@ -64,6 +65,7 @@ import java.util.zip.ZipOutputStream
 fun DownloadExportDialog(
     session: PhotoSessionEntity?,
     allPhotos: List<PhotoItemEntity>,
+    selectedGuest: GuestSummary? = null,
     onDismiss: () -> Unit
 ) {
     if (session == null) return
@@ -224,7 +226,7 @@ fun DownloadExportDialog(
                         Column {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
-                                    text = "Paket ZIP Foto Favorit Klien",
+                                    text = if (selectedGuest != null) "ZIP Favorit ${selectedGuest.clientIp}" else "Paket ZIP Foto Favorit Guest",
                                     color = Color.White,
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.Bold
@@ -238,7 +240,11 @@ fun DownloadExportDialog(
                                 )
                             }
                             Text(
-                                text = "$likedCount foto yang disukai klien • Format .ZIP",
+                                text = if (selectedGuest != null) {
+                                    "$likedCount foto pilihan ${selectedGuest.deviceLabel} • .ZIP"
+                                } else {
+                                    "$likedCount foto yang disukai tamu • Format .ZIP"
+                                },
                                 color = Color(0xFF9CA3AF),
                                 fontSize = 11.sp
                             )
@@ -319,8 +325,9 @@ fun DownloadExportDialog(
                             val downloadDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "FotoSync_Studio")
                             if (!downloadDir.exists()) downloadDir.mkdirs()
 
+                            val guestSuffix = selectedGuest?.clientIp?.replace(".", "-")?.let { "_Guest_$it" } ?: ""
                             val fileName = if (exportOption == 0) {
-                                "${session.folderName}_Favorit_Klien.zip"
+                                "${session.folderName}${guestSuffix}_Favorit_Klien.zip"
                             } else {
                                 "${session.folderName}_Lengkap.zip"
                             }

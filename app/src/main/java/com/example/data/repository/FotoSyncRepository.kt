@@ -9,6 +9,8 @@ import android.graphics.RectF
 import android.os.Environment
 import com.example.data.local.FotoSyncDao
 import com.example.data.model.ExportLogEntity
+import com.example.data.model.GuestIdentity
+import com.example.data.model.GuestSelectionEntity
 import com.example.data.model.PhotoItemEntity
 import com.example.data.model.PhotoSessionEntity
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +41,14 @@ class FotoSyncRepository(
 
     fun getExportLogs(sessionId: String): Flow<List<ExportLogEntity>> {
         return dao.getExportLogs(sessionId)
+    }
+
+    fun getGuestSelectionsForSession(sessionId: String): Flow<List<GuestSelectionEntity>> {
+        return dao.getGuestSelectionsForSession(sessionId)
+    }
+
+    suspend fun getGuestLikedPhotoIdsSync(sessionId: String, clientKey: String): Set<String> {
+        return dao.getGuestLikedPhotoIdsSync(sessionId, clientKey).toSet()
     }
 
     suspend fun insertPhotos(photos: List<PhotoItemEntity>) = withContext(Dispatchers.IO) {
@@ -124,6 +134,31 @@ class FotoSyncRepository(
 
     suspend fun toggleClientLiked(photoId: String, isLiked: Boolean) = withContext(Dispatchers.IO) {
         dao.updateClientLiked(photoId, isLiked)
+    }
+
+    suspend fun setGuestPhotoLiked(
+        sessionId: String,
+        photoId: String,
+        guest: GuestIdentity,
+        isLiked: Boolean
+    ) = withContext(Dispatchers.IO) {
+        if (isLiked) {
+            dao.insertGuestSelection(
+                GuestSelectionEntity(
+                    id = "${sessionId}_${photoId}_${guest.clientKey}",
+                    sessionId = sessionId,
+                    photoId = photoId,
+                    clientKey = guest.clientKey,
+                    clientIp = guest.clientIp,
+                    deviceLabel = guest.deviceLabel,
+                    likedAt = System.currentTimeMillis()
+                )
+            )
+        } else {
+            dao.deleteGuestSelection(sessionId, photoId, guest.clientKey)
+        }
+        val remaining = dao.countGuestSelectionsForPhoto(photoId)
+        dao.updateClientLiked(photoId, remaining > 0)
     }
 
     suspend fun togglePhotographerSelected(photoId: String, isSelected: Boolean) = withContext(Dispatchers.IO) {

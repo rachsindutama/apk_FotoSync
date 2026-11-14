@@ -5,14 +5,17 @@ import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
 import android.graphics.Paint
 import android.util.Log
+import com.example.data.model.GuestIdentity
 import com.example.data.model.PhotoItemEntity
 import com.example.data.model.PhotoSessionEntity
+import com.example.data.model.SocialPlatform
+import com.example.data.model.StudioSocialProfile
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.call
 import io.ktor.server.cio.CIO
-import io.ktor.server.engine.ApplicationEngine
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.response.header
 import io.ktor.server.response.respond
@@ -22,8 +25,6 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.zip.ZipEntry
@@ -31,16 +32,19 @@ import java.util.zip.ZipOutputStream
 
 /**
  * Ktor-powered lightweight CIO embedded HTTP server running directly inside Android.
- * Hosts local photo selection content accessible over Wi-Fi, featuring a dedicated
- * /connect endpoint for QR code connection triggering.
+ * Hosts local photo selection content accessible over Wi-Fi, isolating favorites
+ * per guest IP + persistent device ID and optionally enforcing a studio social follow gate.
  */
 class KtorLocalServer(
     private val scope: CoroutineScope,
-    private val onClientConnected: (clientInfo: String) -> Unit,
-    private val onLikeToggled: (photoId: String, isLiked: Boolean) -> Unit,
-    private val sessionProvider: () -> PhotoSessionEntity?,
-    private val photosProvider: () -> List<PhotoItemEntity>,
-    private val photoBytesProvider: (photoId: String) -> ByteArray?
+    private val onClientConnected: (guest: GuestIdentity) -> Unit,
+    private val onLikeToggled: suspend (photoId: String, isLiked: Boolean, guest: GuestIdentity) -> Unit,
+    private val sessionProvider: suspend () -> PhotoSessionEntity?,
+    private val photosProvider: suspend () -> List<PhotoItemEntity>,
+    private val guestLikedIdsProvider: suspend (sessionId: String, guest: GuestIdentity) -> Set<String>,
+    private val socialProfileProvider: () -> StudioSocialProfile,
+    private val photoBytesProvider: suspend (photoId: String) -> ByteArray?,
+    private val photoThumbBytesProvider: suspend (photoId: String) -> ByteArray? = photoBytesProvider
 ) {
     private var engine: io.ktor.server.engine.EmbeddedServer<*, *>? = null
     var isRunning: Boolean = false
@@ -56,37 +60,47 @@ class KtorLocalServer(
                 routing {
                     // 1. Endpoint dasar pemicu koneksi via pemindaian QR code
                     get("/connect") {
-                        val clientAgent = call.request.headers["User-Agent"] ?: "Mobile Device"
-                        onClientConnected(clientAgent)
+                        val guest = call.extractGuestIdentity()
+                        if (guest.deviceId != "browser") {
+                            onClientConnected(guest)
+                        }
                         call.response.header(HttpHeaders.AccessControlAllowOrigin, "*")
                         val session = sessionProvider()
-                        val photos = photosProvider()
-                        call.respondText(generateClientHtml(session, photos), ContentType.Text.Html)
+                        call.respondText(
+                            generateClientHtml(session, socialProfileProvider()),
+                            ContentType.Text.Html
+                        )
                     }
 
                     get("/") {
                         call.response.header(HttpHeaders.AccessControlAllowOrigin, "*")
                         val session = sessionProvider()
-                        val photos = photosProvider()
-                        call.respondText(generateClientHtml(session, photos), ContentType.Text.Html)
+                        call.respondText(
+                            generateClientHtml(session, socialProfileProvider()),
+                            ContentType.Text.Html
+                        )
                     }
 
                     get("/client") {
-                        val clientAgent = call.request.headers["User-Agent"] ?: "Mobile Device"
-                        onClientConnected(clientAgent)
+                        val guest = call.extractGuestIdentity()
+                        if (guest.deviceId != "browser") {
+                            onClientConnected(guest)
+                        }
                         call.response.header(HttpHeaders.AccessControlAllowOrigin, "*")
                         val session = sessionProvider()
-                        val photos = photosProvider()
-                        call.respondText(generateClientHtml(session, photos), ContentType.Text.Html)
+                        call.respondText(
+                            generateClientHtml(session, socialProfileProvider()),
+                            ContentType.Text.Html
+                        )
                     }
 
-                    // 2. Status & handshake endpoint for QR verification
+                    // 2. Status & handshake endpoint with per-device/IP registration
                     get("/api/connect") {
-                        val clientAgent = call.request.headers["User-Agent"] ?: "Client"
-                        onClientConnected(clientAgent)
+                        val guest = call.extractGuestIdentity()
+                        onClientConnected(guest)
                         call.response.header(HttpHeaders.AccessControlAllowOrigin, "*")
                         call.respondText(
-                            """{"status":"connected","engine":"Ktor CIO","client":"$clientAgent"}""",
+                            """{"status":"connected","engine":"Ktor CIO","clientIp":"${escapeJson(guest.clientIp)}","deviceLabel":"${escapeJson(guest.deviceLabel)}","clientKey":"${escapeJson(guest.clientKey)}"}""",
                             ContentType.Application.Json
                         )
                     }
@@ -103,36 +117,58 @@ class KtorLocalServer(
                         call.respondText(json, ContentType.Application.Json)
                     }
 
-                    // 4. Photos list
+                    // 4. Photos list scoped to the requesting guest's IP + deviceId
                     get("/api/photos") {
+                        val guest = call.extractGuestIdentity()
+                        val session = sessionProvider()
                         val photos = photosProvider()
+                        val likedIds = if (session != null) {
+                            guestLikedIdsProvider(session.id, guest)
+                        } else {
+                            emptySet()
+                        }
                         val items = photos.joinToString(",") { photo ->
-                            """{"id":"${photo.id}","fileName":"${escapeJson(photo.fileName)}","isClientLiked":${photo.isClientLiked},"isPhotographerSelected":${photo.isPhotographerSelected},"rating":${photo.rating},"fileSize":${photo.fileSize},"resolution":"${photo.resolution}","capturedAt":${photo.capturedAt}}"""
+                            val isLikedByGuest = likedIds.contains(photo.id)
+                            """{"id":"${photo.id}","fileName":"${escapeJson(photo.fileName)}","isClientLiked":$isLikedByGuest,"isPhotographerSelected":${photo.isPhotographerSelected},"rating":${photo.rating},"fileSize":${photo.fileSize},"resolution":"${photo.resolution}","capturedAt":${photo.capturedAt}}"""
                         }
                         call.response.header(HttpHeaders.AccessControlAllowOrigin, "*")
                         call.respondText("[$items]", ContentType.Application.Json)
                     }
 
-                    // 5. Toggle Like
+                    // 5. Toggle Like isolated to requesting guest's IP + deviceId
                     post("/api/like") {
+                        val guest = call.extractGuestIdentity()
+                        onClientConnected(guest)
                         val photoId = call.request.queryParameters["id"] ?: ""
                         val liked = call.request.queryParameters["liked"]?.toBooleanStrictOrNull() ?: true
                         if (photoId.isNotEmpty()) {
-                            onLikeToggled(photoId, liked)
+                            onLikeToggled(photoId, liked, guest)
                             call.response.header(HttpHeaders.AccessControlAllowOrigin, "*")
-                            call.respondText("""{"status":"ok","id":"$photoId","isClientLiked":$liked}""", ContentType.Application.Json)
+                            call.respondText(
+                                """{"status":"ok","id":"$photoId","isClientLiked":$liked,"clientKey":"${escapeJson(guest.clientKey)}"}""",
+                                ContentType.Application.Json
+                            )
                         } else {
                             call.respond(HttpStatusCode.BadRequest, "Missing photo id")
                         }
                     }
 
-                    // 6. View Photo
+                    // 6. View Photo (supports ?thumb=1 for fast gallery grid loading)
                     get("/photo") {
                         val photoId = call.request.queryParameters["id"] ?: ""
+                        val isThumb = call.request.queryParameters["thumb"] == "1"
                         val photo = photosProvider().find { it.id == photoId }
                         val label = photo?.fileName ?: "DSC_$photoId"
 
-                        if (photo != null && photo.localUri.isNotEmpty()) {
+                        if (isThumb) {
+                            val thumbBytes = photoThumbBytesProvider(photoId) ?: generatePlaceholder(label)
+                            call.response.header(HttpHeaders.AccessControlAllowOrigin, "*")
+                            call.response.header(HttpHeaders.CacheControl, "public, max-age=3600")
+                            call.respondBytes(thumbBytes, ContentType.Image.JPEG)
+                            return@get
+                        }
+
+                        if (photo != null && photo.localUri.isNotEmpty() && !photo.localUri.startsWith("content://")) {
                             val file = File(photo.localUri)
                             if (file.exists() && file.isFile) {
                                 call.response.header(HttpHeaders.AccessControlAllowOrigin, "*")
@@ -155,7 +191,7 @@ class KtorLocalServer(
                         call.response.header(HttpHeaders.AccessControlAllowOrigin, "*")
                         call.response.header(HttpHeaders.ContentDisposition, "attachment; filename=\"$fileName\"")
 
-                        if (photo != null && photo.localUri.isNotEmpty()) {
+                        if (photo != null && photo.localUri.isNotEmpty() && !photo.localUri.startsWith("content://")) {
                             val file = File(photo.localUri)
                             if (file.exists() && file.isFile) {
                                 call.respondBytes(file.readBytes(), ContentType.Image.JPEG)
@@ -167,10 +203,16 @@ class KtorLocalServer(
                         call.respondBytes(bytes, ContentType.Image.JPEG)
                     }
 
-                    // 8. Download Liked Photos ZIP
+                    // 8. Download Liked Photos ZIP scoped strictly to requesting guest
                     get("/download/all-liked") {
+                        val guest = call.extractGuestIdentity()
                         val session = sessionProvider()
-                        val liked = photosProvider().filter { it.isClientLiked }
+                        val likedIds = if (session != null) {
+                            guestLikedIdsProvider(session.id, guest)
+                        } else {
+                            emptySet()
+                        }
+                        val liked = photosProvider().filter { likedIds.contains(it.id) }
                         val prefix = session?.folderName ?: "FotoSync"
                         val zipName = "${prefix}_Pilihan_Favorit.zip"
 
@@ -218,7 +260,47 @@ class KtorLocalServer(
         engine = null
     }
 
-    private fun createZipArchive(photos: List<PhotoItemEntity>): ByteArray {
+    private fun ApplicationCall.extractGuestIdentity(): GuestIdentity {
+        val forwardedIp = request.headers["X-Forwarded-For"]?.split(",")?.firstOrNull()?.trim()
+        val rawIp = forwardedIp?.takeIf { it.isNotBlank() } ?: request.local.remoteAddress
+        val clientIp = rawIp.removePrefix("::ffff:").ifBlank { "unknown-ip" }
+
+        val rawDeviceId = request.queryParameters["deviceId"]
+            ?: request.headers["X-Device-Id"]
+            ?: request.cookies["fotosync_device_id"]
+            ?: "browser"
+        val deviceId = rawDeviceId.replace(Regex("[^a-zA-Z0-9_-]"), "").take(48).ifBlank { "browser" }
+
+        val ua = request.headers["User-Agent"] ?: ""
+        val os = when {
+            ua.contains("iPhone", ignoreCase = true) -> "iPhone"
+            ua.contains("iPad", ignoreCase = true) -> "iPad"
+            ua.contains("Android", ignoreCase = true) -> "Android"
+            ua.contains("Windows", ignoreCase = true) -> "Windows"
+            ua.contains("Mac OS", ignoreCase = true) -> "Mac"
+            ua.contains("Linux", ignoreCase = true) -> "Linux"
+            else -> "Perangkat"
+        }
+        val browser = when {
+            ua.contains("Edg", ignoreCase = true) -> "Edge"
+            ua.contains("OPR", ignoreCase = true) || ua.contains("Opera", ignoreCase = true) -> "Opera"
+            ua.contains("SamsungBrowser", ignoreCase = true) -> "Samsung"
+            ua.contains("Chrome", ignoreCase = true) -> "Chrome"
+            ua.contains("Firefox", ignoreCase = true) -> "Firefox"
+            ua.contains("Safari", ignoreCase = true) -> "Safari"
+            else -> "Browser"
+        }
+        val deviceLabel = "$os • $browser"
+        val clientKey = "$clientIp::$deviceId"
+        return GuestIdentity(
+            clientKey = clientKey,
+            clientIp = clientIp,
+            deviceId = deviceId,
+            deviceLabel = deviceLabel
+        )
+    }
+
+    private suspend fun createZipArchive(photos: List<PhotoItemEntity>): ByteArray {
         val targetList = if (photos.isEmpty()) photosProvider() else photos
         val baos = ByteArrayOutputStream()
         val zos = ZipOutputStream(baos)
@@ -226,8 +308,8 @@ class KtorLocalServer(
             val entry = ZipEntry(photo.fileName)
             zos.putNextEntry(entry)
 
-            val file = File(photo.localUri)
-            val bytes = if (file.exists() && file.isFile) {
+            val file = if (!photo.localUri.startsWith("content://")) File(photo.localUri) else null
+            val bytes = if (file != null && file.exists() && file.isFile) {
                 try {
                     file.readBytes()
                 } catch (e: Exception) {
@@ -278,10 +360,79 @@ class KtorLocalServer(
             .replace("\t", "\\t")
     }
 
-    private fun generateClientHtml(session: PhotoSessionEntity?, photos: List<PhotoItemEntity>): String {
-        val clientName = session?.clientName ?: "Portal Klien"
-        val folderName = session?.folderName ?: "Sesi Pemotretan"
-        val sessionDate = session?.sessionDate ?: ""
+    private fun escapeHtml(str: String): String {
+        return str.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+            .replace("'", "&#39;")
+    }
+
+    private fun generateClientHtml(
+        session: PhotoSessionEntity?,
+        socialProfile: StudioSocialProfile
+    ): String {
+        val sessionId = session?.id ?: "default"
+        val clientName = escapeHtml(session?.clientName ?: "Portal Klien")
+        val rawVendorName = socialProfile.vendorName.trim()
+        val hasVendorName = rawVendorName.isNotEmpty()
+        val vendorNameHtml = escapeHtml(rawVendorName)
+        val pageTitleHtml = if (hasVendorName) "$vendorNameHtml — $clientName" else "FotoSync - Seleksi dan Unduh Foto"
+        val configuredAccounts = socialProfile.configuredAccounts
+        val gateRequired = configuredAccounts.isNotEmpty()
+        val socialSignature = configuredAccounts.joinToString("|") { "${it.platform.name}:${it.socialUrl}" }
+        val escapedSocialSignatureJs = escapeJson(socialSignature)
+        val escapedSessionIdJs = escapeJson(sessionId)
+
+        val socialButtonsHtml = configuredAccounts.joinToString("\n") { acc ->
+            val plat = acc.platform
+            val platName = escapeHtml(plat.displayName)
+            val urlHtml = escapeHtml(acc.socialUrl.trim())
+            val labelHtml = escapeHtml(acc.socialName.trim().ifBlank { acc.socialUrl.trim() })
+            val bg = when (plat) {
+                SocialPlatform.INSTAGRAM -> "linear-gradient(135deg, #F58529 0%, #DD2A7B 55%, #8134AF 100%)"
+                SocialPlatform.FACEBOOK -> "linear-gradient(135deg, #1877F2 0%, #0E58C8 100%)"
+                SocialPlatform.THREADS -> "linear-gradient(135deg, #1F2937 0%, #090A0D 100%)"
+                SocialPlatform.TIKTOK -> "linear-gradient(135deg, #FE2C55 0%, #111827 100%)"
+                SocialPlatform.YOUTUBE -> "linear-gradient(135deg, #EF4444 0%, #B91C1C 100%)"
+                SocialPlatform.X -> "linear-gradient(135deg, #1F2937 0%, #0B0C10 100%)"
+                SocialPlatform.WEBSITE -> "linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%)"
+            }
+            val btnLabel = when (plat) {
+                SocialPlatform.YOUTUBE -> "Subscribe $platName ($labelHtml)"
+                SocialPlatform.WEBSITE -> "Kunjungi Website ($labelHtml)"
+                else -> "Follow $platName ($labelHtml)"
+            }
+            """
+                <a href="$urlHtml" target="_blank" rel="noopener noreferrer" class="gate-step-link" style="background: $bg; border: 1px solid rgba(255,255,255,0.16);" onclick="handleSocialLinkClick(this)">
+                    <span>$btnLabel</span>
+                </a>
+            """.trimIndent()
+        }
+
+        val gateTitleHtml = if (hasVendorName) "Follow $vendorNameHtml Dulu" else "Follow Sosmed Studio Dulu"
+        val studioRefHtml = if (hasVendorName) "<strong>$vendorNameHtml</strong>" else "studio"
+
+        val gateSubtitleHtml = if (configuredAccounts.size > 1) {
+            "Untuk melihat dan memilih foto pada sesi <strong>$clientName</strong>, silakan klik dan ikuti <strong>salah satu</strong> akun resmi $studioRefHtml di bawah ini."
+        } else {
+            val singlePlat = escapeHtml(configuredAccounts.firstOrNull()?.platform?.displayName ?: "Studio")
+            "Untuk melihat dan memilih foto pada sesi <strong>$clientName</strong>, silakan klik tombol di bawah untuk membuka profil resmi <strong>$singlePlat</strong> $studioRefHtml terlebih dahulu."
+        }
+
+        val headerIdentityHtml = if (hasVendorName) {
+            """
+                <div class="vendor-title">$vendorNameHtml</div>
+                <div class="session-subtitle-header">$clientName</div>
+            """.trimIndent()
+        } else {
+            """
+                <h1 class="session-title">$clientName</h1>
+            """.trimIndent()
+        }
+
+        val gateDisplayStyle = if (gateRequired) "flex" else "none"
+        val galleryDisplayStyle = if (gateRequired) "none" else "block"
 
         return """
 <!DOCTYPE html>
@@ -289,7 +440,7 @@ class KtorLocalServer(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>FotoSync - Seleksi dan Unduh Foto</title>
+    <title>$pageTitleHtml</title>
     <style>
         :root {
             --bg: #0F1014;
@@ -298,6 +449,7 @@ class KtorLocalServer(
             --gold: #F5A623;
             --crimson: #E11D48;
             --blue: #3B82F6;
+            --emerald: #10B981;
             --text-primary: #F3F4F6;
             --text-secondary: #9CA3AF;
             --border: #2C3240;
@@ -309,65 +461,197 @@ class KtorLocalServer(
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
             padding-bottom: 100px;
         }
+        /* Mandatory Follow Gate Overlay */
+        .follow-gate-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 250;
+            background: radial-gradient(circle at top, rgba(245, 166, 35, 0.14), transparent 55%), #0F1014;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            overflow-y: auto;
+        }
+        .follow-gate-card {
+            width: 100%;
+            max-width: 420px;
+            max-height: 90vh;
+            overflow-y: auto;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 22px;
+            padding: 24px 20px;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.55);
+            text-align: center;
+        }
+        .gate-icon-wrap {
+            width: 56px;
+            height: 56px;
+            margin: 0 auto 14px;
+            border-radius: 16px;
+            background: rgba(245, 166, 35, 0.16);
+            border: 1px solid rgba(245, 166, 35, 0.35);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--gold);
+        }
+        .gate-title {
+            font-size: 20px;
+            font-weight: 800;
+            color: var(--text-primary);
+            margin-bottom: 8px;
+        }
+        .gate-subtitle {
+            font-size: 13px;
+            line-height: 1.5;
+            color: var(--text-secondary);
+            margin-bottom: 18px;
+        }
+        .gate-studio-box {
+            background: var(--surface-elevated);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 12px 14px;
+            margin-bottom: 18px;
+            text-align: left;
+        }
+        .gate-studio-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            margin-bottom: 4px;
+        }
+        .gate-studio-name {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--gold);
+            word-break: break-word;
+        }
+        .gate-studio-url {
+            font-size: 12px;
+            color: #93C5FD;
+            word-break: break-all;
+            margin-top: 2px;
+        }
+        .gate-step-link {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            width: 100%;
+            min-height: 48px;
+            padding: 12px 16px;
+            border-radius: 14px;
+            background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%);
+            color: #FFFFFF;
+            font-size: 14px;
+            font-weight: 700;
+            text-decoration: none;
+            margin-bottom: 0;
+            transition: transform 0.15s ease, opacity 0.15s ease;
+        }
+        .gate-step-link:active { transform: scale(0.98); }
+        .gate-step-link.clicked {
+            background: linear-gradient(135deg, #059669 0%, #047857 100%);
+        }
+        .gate-confirm-btn {
+            width: 100%;
+            min-height: 48px;
+            padding: 12px 16px;
+            border-radius: 14px;
+            border: 1px solid var(--border);
+            background: #222630;
+            color: #6B7280;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: not-allowed;
+            transition: all 0.2s ease;
+        }
+        .gate-confirm-btn.ready {
+            background: linear-gradient(135deg, var(--gold) 0%, #D97706 100%);
+            border-color: var(--gold);
+            color: #121316;
+            cursor: pointer;
+        }
+        .gate-helper {
+            margin-top: 12px;
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
         header {
-            background: linear-gradient(180deg, rgba(24,26,32,0.98) 0%, rgba(15,16,20,0.95) 100%);
+            background: rgba(18, 20, 26, 0.92);
             border-bottom: 1px solid var(--border);
-            padding: 16px 20px;
+            padding: 12px 16px;
             position: sticky;
             top: 0;
             z-index: 50;
             backdrop-filter: blur(12px);
-        }
-        .header-top {
             display: flex;
             align-items: center;
             justify-content: space-between;
+            gap: 12px;
         }
-        .brand {
+        .header-identity {
             display: flex;
-            align-items: center;
-            gap: 8px;
+            flex-direction: column;
+            min-width: 0;
+            flex: 1;
         }
-        .brand-badge {
-            background: var(--gold);
-            color: #121316;
+        .vendor-title {
+            font-size: 15px;
             font-weight: 800;
-            font-size: 11px;
-            padding: 3px 8px;
-            border-radius: 6px;
-            letter-spacing: 0.5px;
+            color: var(--gold);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            line-height: 1.25;
         }
-        .live-status {
-            display: flex;
-            align-items: center;
-            gap: 6px;
+        .session-subtitle-header {
             font-size: 12px;
-            color: #10B981;
             font-weight: 600;
-        }
-        .live-dot {
-            width: 8px;
-            height: 8px;
-            background-color: #10B981;
-            border-radius: 50%;
-        }
-        .session-info {
-            margin-top: 10px;
+            color: var(--text-secondary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            line-height: 1.25;
+            margin-top: 2px;
         }
         .session-title {
-            font-size: 18px;
+            font-size: 16px;
             font-weight: 700;
             color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
-        .session-subtitle {
-            font-size: 13px;
-            color: var(--text-secondary);
-            margin-top: 2px;
+        .live-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 999px;
+            background: rgba(16, 185, 129, 0.12);
+            border: 1px solid rgba(16, 185, 129, 0.28);
+            font-size: 12px;
+            color: var(--emerald);
+            font-weight: 600;
+            flex-shrink: 0;
+            white-space: nowrap;
+        }
+        .live-dot {
+            width: 7px;
+            height: 7px;
+            background-color: var(--emerald);
+            border-radius: 50%;
         }
         .tabs {
             display: flex;
-            gap: 10px;
-            padding: 14px 20px 6px;
+            gap: 8px;
+            padding: 10px 16px 4px;
             overflow-x: auto;
         }
         .tab-btn {
@@ -520,16 +804,6 @@ class KtorLocalServer(
             align-items: center;
             gap: 6px;
         }
-        .done-btn {
-            background: linear-gradient(135deg, var(--gold) 0%, #E08A00 100%);
-            color: #121316;
-            font-weight: 700;
-            font-size: 12px;
-            padding: 9px 14px;
-            border-radius: 10px;
-            border: none;
-            cursor: pointer;
-        }
         .lightbox-modal {
             position: fixed;
             top: 0;
@@ -640,55 +914,76 @@ class KtorLocalServer(
     </style>
 </head>
 <body>
-    <header>
-        <div class="header-top">
-            <div class="brand">
-                <span class="brand-badge">FotoSync</span>
+    <!-- Mandatory Social/Website Follow Gate -->
+    <div id="followGateOverlay" class="follow-gate-overlay" style="display:$gateDisplayStyle;">
+        <div class="follow-gate-card">
+            <div class="gate-icon-wrap">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                    <circle cx="8.5" cy="7" r="4"></circle>
+                    <line x1="20" y1="8" x2="20" y2="14"></line>
+                    <line x1="23" y1="11" x2="17" y2="11"></line>
+                </svg>
+            </div>
+            <h2 class="gate-title">$gateTitleHtml</h2>
+            <p class="gate-subtitle">
+                $gateSubtitleHtml
+            </p>
+            <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px;">
+                $socialButtonsHtml
+            </div>
+            <button id="confirmFollowBtn" class="gate-confirm-btn" disabled onclick="handleConfirmFollow()">
+                Pilih salah satu tombol di atas dulu
+            </button>
+            <p class="gate-helper">Aplikasi resmi atau browser akan terbuka langsung. Pilihan foto Anda tersimpan khusus untuk perangkat ini saja.</p>
+        </div>
+    </div>
+
+    <div id="galleryMain" style="display:$galleryDisplayStyle;">
+        <header>
+            <div class="header-identity">
+                $headerIdentityHtml
             </div>
             <div class="live-status">
                 <div class="live-dot"></div>
                 <span>Tersambung</span>
             </div>
-        </div>
-        <div class="session-info">
-            <h1 class="session-title">$clientName</h1>
-            <p class="session-subtitle">$folderName</p>
-        </div>
-    </header>
+        </header>
 
-    <div class="tabs">
-        <button id="tabAll" class="tab-btn active" onclick="switchTab('all')">
-            Semua Foto (<span id="countAll">0</span>)
-        </button>
-        <button id="tabLiked" class="tab-btn tab-liked" onclick="switchTab('liked')">
-            Pilihan Favorit (<span id="countLiked">0</span>)
-        </button>
-    </div>
+        <div class="tabs">
+            <button id="tabAll" class="tab-btn active" onclick="switchTab('all')">
+                Semua Foto (<span id="countAll">0</span>)
+            </button>
+            <button id="tabLiked" class="tab-btn tab-liked" onclick="switchTab('liked')">
+                Pilihan Saya (<span id="countLiked">0</span>)
+            </button>
+        </div>
 
-    <div class="gallery-container">
-        <div id="photoGrid" class="photo-grid"></div>
-        <div id="emptyView" class="empty-state" style="display:none;">
-            <div class="empty-icon">
-                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#9CA3AF" stroke-width="1.5">
-                    <rect x="3" y="3" width="18" height="18" rx="3"></rect>
-                    <circle cx="8.5" cy="8.5" r="1.5"></circle>
-                    <polyline points="21 15 16 10 5 21"></polyline>
-                </svg>
+        <div class="gallery-container">
+            <div id="photoGrid" class="photo-grid"></div>
+            <div id="emptyView" class="empty-state" style="display:none;">
+                <div class="empty-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#9CA3AF" stroke-width="1.5">
+                        <rect x="3" y="3" width="18" height="18" rx="3"></rect>
+                        <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                        <polyline points="21 15 16 10 5 21"></polyline>
+                    </svg>
+                </div>
+                <p style="font-weight:600;">Belum ada foto yang Anda pilih</p>
+                <p style="font-size:12px;margin-top:4px;">Tap ikon hati pada foto untuk menyimpan pilihan perangkat Anda.</p>
             </div>
-            <p style="font-weight:600;">Belum ada foto yang disukai</p>
-            <p style="font-size:12px;margin-top:4px;">Pilih foto yang ingin Anda tandai sebagai favorit.</p>
         </div>
-    </div>
 
-    <div class="bottom-summary-bar">
-        <div class="summary-text">
-            <span>Favorit: <span id="likedSummaryCount" class="summary-count">0</span> foto</span>
-        </div>
-        <div class="bottom-btns">
-            <a id="btnDlZip" href="/download/all-liked" class="dl-zip-btn" title="Unduh Paket ZIP Foto Favorit">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-                <span>Unduh ZIP</span>
-            </a>
+        <div class="bottom-summary-bar">
+            <div class="summary-text">
+                <span>Pilihan Anda: <span id="likedSummaryCount" class="summary-count">0</span> foto</span>
+            </div>
+            <div class="bottom-btns">
+                <a id="btnDlZip" href="/download/all-liked" class="dl-zip-btn" title="Unduh Paket ZIP Foto Favorit">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    <span>Unduh ZIP</span>
+                </a>
+            </div>
         </div>
     </div>
 
@@ -718,17 +1013,125 @@ class KtorLocalServer(
     </div>
 
     <script>
+        const GATE_REQUIRED = $gateRequired;
+        const SESSION_ID = "$escapedSessionIdJs";
+        const SOCIAL_SIGNATURE = "$escapedSocialSignatureJs";
+        const DEVICE_STORAGE_KEY = 'fotosync_device_id';
+
+        function getOrCreateDeviceId() {
+            let id = '';
+            try {
+                id = localStorage.getItem(DEVICE_STORAGE_KEY) || '';
+            } catch (_) {}
+            if (!id) {
+                id = 'dev_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 6);
+                try {
+                    localStorage.setItem(DEVICE_STORAGE_KEY, id);
+                } catch (_) {}
+            }
+            try {
+                document.cookie = 'fotosync_device_id=' + encodeURIComponent(id) + '; path=/; max-age=31536000; SameSite=Lax';
+            } catch (_) {}
+            return id;
+        }
+
+        const DEVICE_ID = getOrCreateDeviceId();
+
+        function hashString(str) {
+            let h = 0;
+            for (let i = 0; i < str.length; i++) {
+                h = ((h << 5) - h) + str.charCodeAt(i);
+                h |= 0;
+            }
+            return Math.abs(h).toString(36);
+        }
+
+        const GATE_STORAGE_KEY = 'fotosync_follow_ok_' + SESSION_ID + '_' + hashString(SOCIAL_SIGNATURE);
+        const GATE_CLICKED_SESSION_KEY = 'fotosync_follow_clicked_' + SESSION_ID + '_' + hashString(SOCIAL_SIGNATURE);
+
+        let isGateUnlocked = !GATE_REQUIRED;
+        let hasClickedSocial = false;
+
+        try {
+            if (GATE_REQUIRED && localStorage.getItem(GATE_STORAGE_KEY) === '1') {
+                isGateUnlocked = true;
+            }
+            if (sessionStorage.getItem(GATE_CLICKED_SESSION_KEY) === '1') {
+                hasClickedSocial = true;
+            }
+        } catch (_) {}
+
+        function applyGateUiState() {
+            const overlay = document.getElementById('followGateOverlay');
+            const gallery = document.getElementById('galleryMain');
+            const confirmBtn = document.getElementById('confirmFollowBtn');
+
+            if (isGateUnlocked) {
+                overlay.style.display = 'none';
+                gallery.style.display = 'block';
+            } else {
+                overlay.style.display = 'flex';
+                gallery.style.display = 'none';
+                if (hasClickedSocial) {
+                    confirmBtn.disabled = false;
+                    confirmBtn.classList.add('ready');
+                    confirmBtn.innerText = 'Saya Sudah Follow, Buka Galeri';
+                }
+            }
+        }
+
+        function handleSocialLinkClick(el) {
+            hasClickedSocial = true;
+            try {
+                sessionStorage.setItem(GATE_CLICKED_SESSION_KEY, '1');
+            } catch (_) {}
+            if (el && el.classList) {
+                el.classList.add('clicked');
+            }
+            const confirmBtn = document.getElementById('confirmFollowBtn');
+            confirmBtn.disabled = false;
+            confirmBtn.classList.add('ready');
+            confirmBtn.innerText = 'Saya Sudah Follow, Buka Galeri';
+        }
+
+        function handleConfirmFollow() {
+            if (!hasClickedSocial) return;
+            isGateUnlocked = true;
+            try {
+                localStorage.setItem(GATE_STORAGE_KEY, '1');
+            } catch (_) {}
+            applyGateUiState();
+            fetchPhotos();
+        }
+
         let allPhotos = [];
         let currentTab = 'all';
         let currentViewingId = null;
+        let lastDataSignature = '';
+
+        async function registerClientConnection() {
+            try {
+                await fetch('/api/connect?deviceId=' + encodeURIComponent(DEVICE_ID), {
+                    headers: { 'X-Device-Id': DEVICE_ID }
+                });
+            } catch (_) {}
+        }
 
         async function fetchPhotos() {
+            if (!isGateUnlocked) return;
             try {
-                const res = await fetch('/api/photos');
+                const res = await fetch('/api/photos?deviceId=' + encodeURIComponent(DEVICE_ID), {
+                    headers: { 'X-Device-Id': DEVICE_ID }
+                });
                 if (res.ok) {
-                    allPhotos = await res.json();
-                    renderGallery();
-                    updateCounts();
+                    const nextPhotos = await res.json();
+                    const sig = nextPhotos.map(p => p.id + ':' + (p.isClientLiked ? '1' : '0')).join('|');
+                    if (sig !== lastDataSignature) {
+                        lastDataSignature = sig;
+                        allPhotos = nextPhotos;
+                        renderGallery();
+                        updateCounts();
+                    }
                 }
             } catch (err) {
                 console.error('Fetch error:', err);
@@ -745,10 +1148,10 @@ class KtorLocalServer(
             const iconSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
             if (likedCount > 0) {
                 zipBtn.innerHTML = iconSvg + '<span>Unduh ZIP (' + likedCount + ')</span>';
-                zipBtn.href = '/download/all-liked';
+                zipBtn.href = '/download/all-liked?deviceId=' + encodeURIComponent(DEVICE_ID);
             } else {
                 zipBtn.innerHTML = iconSvg + '<span>Unduh Semua ZIP</span>';
-                zipBtn.href = '/download/session-zip';
+                zipBtn.href = '/download/session-zip?deviceId=' + encodeURIComponent(DEVICE_ID);
             }
         }
 
@@ -785,8 +1188,9 @@ class KtorLocalServer(
 
                 const img = document.createElement('img');
                 img.className = 'photo-thumb';
-                img.src = '/photo?id=' + encodeURIComponent(photo.id);
+                img.src = '/photo?id=' + encodeURIComponent(photo.id) + '&thumb=1';
                 img.loading = 'lazy';
+                img.decoding = 'async';
                 img.alt = photo.fileName;
 
                 thumbWrap.appendChild(img);
@@ -839,12 +1243,19 @@ class KtorLocalServer(
             const item = allPhotos.find(p => p.id === photoId);
             if (item) {
                 item.isClientLiked = liked;
+                lastDataSignature = allPhotos.map(p => p.id + ':' + (p.isClientLiked ? '1' : '0')).join('|');
                 updateCounts();
                 renderGallery();
             }
 
             try {
-                await fetch('/api/like?id=' + encodeURIComponent(photoId) + '&liked=' + liked, { method: 'POST' });
+                await fetch(
+                    '/api/like?id=' + encodeURIComponent(photoId) + '&liked=' + liked + '&deviceId=' + encodeURIComponent(DEVICE_ID),
+                    {
+                        method: 'POST',
+                        headers: { 'X-Device-Id': DEVICE_ID }
+                    }
+                );
             } catch (e) {
                 console.error('Like failed', e);
             }
@@ -888,7 +1299,6 @@ class KtorLocalServer(
             showCurrentLightboxPhoto();
         }
 
-        // Keyboard arrow navigation
         document.addEventListener('keydown', (e) => {
             if (!document.getElementById('lightbox').classList.contains('active')) return;
             if (e.key === 'ArrowLeft') prevPhoto();
@@ -896,7 +1306,6 @@ class KtorLocalServer(
             if (e.key === 'Escape') closeLightbox();
         });
 
-        // Touch swipe support
         let touchStartX = 0;
         let touchEndX = 0;
         const lightboxElem = document.getElementById('lightbox');
@@ -937,12 +1346,11 @@ class KtorLocalServer(
             updateLightboxLikeBtn(newLiked);
         }
 
-        function showDoneDialog() {
-            const liked = allPhotos.filter(p => p.isClientLiked).length;
-            alert('Pilihan selesai: ' + liked + ' foto favorit telah disinkronkan ke fotografer. Anda juga dapat mengunduh foto pilihan via tombol Unduh ZIP.');
+        applyGateUiState();
+        registerClientConnection();
+        if (isGateUnlocked) {
+            fetchPhotos();
         }
-
-        fetchPhotos();
         setInterval(fetchPhotos, 3500);
     </script>
 </body>

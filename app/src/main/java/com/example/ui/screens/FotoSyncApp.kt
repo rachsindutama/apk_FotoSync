@@ -53,9 +53,11 @@ import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -77,6 +79,7 @@ import androidx.compose.material3.TextButton
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -96,7 +99,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.GuestSummary
 import com.example.data.model.PhotoItemEntity
+import com.example.data.model.StudioSocialProfile
 import com.example.ui.components.AddSessionDialog
 import com.example.ui.components.ClientServerDialog
 import com.example.ui.components.DownloadExportDialog
@@ -104,6 +109,7 @@ import com.example.ui.components.DriveBackupDialog
 import com.example.ui.components.PhotoCard
 import com.example.ui.components.PhotoCarouselDialog
 import com.example.ui.components.SessionCard
+import com.example.ui.components.StudioSocialSettingsDialog
 import com.example.ui.theme.CobaltBlue
 import com.example.ui.theme.CrimsonHeart
 import com.example.ui.theme.DarkroomBase
@@ -111,6 +117,7 @@ import com.example.ui.theme.DarkroomSurface
 import com.example.ui.theme.StudioGold
 import com.example.ui.viewmodel.FotoSyncViewModel
 import com.example.ui.viewmodel.PhotoFilter
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
@@ -122,8 +129,14 @@ fun FotoSyncApp(
 
     val allSessions by viewModel.allSessions.collectAsState()
     val activeSession by viewModel.activeSession.collectAsState()
+    val effectivePhotos by viewModel.effectivePhotos.collectAsState()
     val filteredPhotos by viewModel.filteredPhotos.collectAsState()
     val photoFilter by viewModel.photoFilter.collectAsState()
+    val sessionGuests by viewModel.sessionGuests.collectAsState()
+    val selectedGuestKey by viewModel.selectedGuestKey.collectAsState()
+    val guestLikeCountsByPhotoId by viewModel.guestLikeCountsByPhotoId.collectAsState()
+    val studioSocialProfile by viewModel.studioSocialProfile.collectAsState()
+    val showSocialSettingsDialog by viewModel.showSocialSettingsDialog.collectAsState()
     val isServerRunning by viewModel.isServerRunning.collectAsState()
     val serverUrl by viewModel.serverUrl.collectAsState()
     val runningSessionIds by viewModel.runningSessionIds.collectAsState()
@@ -143,7 +156,6 @@ fun FotoSyncApp(
     var activeMainTab by remember { mutableIntStateOf(0) } // 0: Galeri Foto, 1: Folder Sesi
     var showDownloadDialog by remember { mutableStateOf(false) }
     var isSpeedDialOpen by remember { mutableStateOf(false) }
-    var showDeleteConfirmDialog by remember { mutableStateOf(false) }
 
     // Automatically sync storage folder whenever user returns to the app from other apps
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
@@ -167,22 +179,18 @@ fun FotoSyncApp(
         }
     }
 
-    // Storage Access Framework folder picker for manual storage path selection
-    val folderPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        if (uri != null) {
-            val flags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            context.contentResolver.takePersistableUriPermission(uri, flags)
-            viewModel.setCustomStorageUri(uri.toString())
-            Toast.makeText(context, "Jalur penyimpanan manual berhasil diset!", Toast.LENGTH_LONG).show()
+    // Auto-dismiss live client connection banner after 4 seconds
+    LaunchedEffect(clientConnectedEvent) {
+        if (clientConnectedEvent != null) {
+            delay(4000L)
+            viewModel.dismissClientConnectedEvent()
         }
     }
 
-    // Counts
-    val totalPhotos = remember(filteredPhotos) { filteredPhotos.size }
-    val clientLikedCount = remember(filteredPhotos) { filteredPhotos.count { it.isClientLiked } }
-    val photographerPickCount = remember(filteredPhotos) { filteredPhotos.count { it.isPhotographerSelected } }
+    val totalPhotos = remember(effectivePhotos) { effectivePhotos.size }
+    val selectedGuestSummary = remember(sessionGuests, selectedGuestKey) {
+        sessionGuests.find { it.clientKey == selectedGuestKey }
+    }
 
     Scaffold(
         modifier = Modifier
@@ -193,96 +201,10 @@ fun FotoSyncApp(
             TopStudioHeader(
                 activeSession = activeSession,
                 isServerRunning = isServerRunning,
+                socialProfile = studioSocialProfile,
+                onOpenSocialSettings = { viewModel.openSocialSettingsDialog() },
                 onOpenDownload = { showDownloadDialog = true }
             )
-        },
-        bottomBar = {
-            AnimatedVisibility(
-                visible = activeMainTab == 0 && photographerPickCount > 0,
-                enter = fadeIn() + expandVertically(),
-                exit = fadeOut() + shrinkVertically()
-            ) {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
-                        .testTag("selection_sticky_action_bar"),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E222D)),
-                    border = androidx.compose.foundation.BorderStroke(1.5.dp, StudioGold.copy(alpha = 0.7f)),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 10.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        // Left side: count badge and select all
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .background(StudioGold, CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "$photographerPickCount",
-                                    color = Color(0xFF121316),
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                            Text(
-                                text = "Ditandai",
-                                color = Color.White,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-
-                            val allSelected = totalPhotos > 0 && photographerPickCount == totalPhotos
-                            TextButton(
-                                onClick = { viewModel.selectAllPhotographerMarked(!allSelected) },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = if (allSelected) "Lepas Semua" else "Pilih Semua",
-                                    color = StudioGold,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-
-                        // Right side: Delete from storage button
-                        Button(
-                            onClick = { showDeleteConfirmDialog = true },
-                            colors = ButtonDefaults.buttonColors(containerColor = CrimsonHeart),
-                            shape = RoundedCornerShape(10.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                            modifier = Modifier.testTag("delete_selected_storage_btn")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Delete,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Hapus File",
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-            }
         },
         floatingActionButton = {
             SpeedDialFab(
@@ -303,9 +225,9 @@ fun FotoSyncApp(
                     isSpeedDialOpen = false
                     showDownloadDialog = true
                 },
-                onSelectStorageFolder = {
+                onOpenSocialSettings = {
                     isSpeedDialOpen = false
-                    folderPickerLauncher.launch(null)
+                    viewModel.openSocialSettingsDialog()
                 },
                 onImportPhotos = {
                     isSpeedDialOpen = false
@@ -425,25 +347,13 @@ fun FotoSyncApp(
                     activeSession = activeSession,
                     photos = filteredPhotos,
                     photoFilter = photoFilter,
-                    searchQuery = searchQuery,
                     totalPhotos = totalPhotos,
-                    clientLikedCount = clientLikedCount,
-                    photographerPickCount = photographerPickCount,
-                    onSetFilter = { viewModel.setPhotoFilter(it) },
-                    onSearchQueryChanged = { viewModel.setSearchQuery(it) },
+                    sessionGuests = sessionGuests,
+                    selectedGuestKey = selectedGuestKey,
+                    guestLikeCountsByPhotoId = guestLikeCountsByPhotoId,
+                    onSelectMainFilter = { viewModel.selectFilterAndClearGuest(it) },
+                    onToggleGuestChip = { viewModel.toggleGuestChipFilter(it) },
                     onPhotoClick = { viewModel.openPhotoDetail(it) },
-                    onToggleClientLike = { id, currentVal -> viewModel.toggleClientLiked(id, currentVal) },
-                    onTogglePhotographerSelect = { id, currentVal -> viewModel.togglePhotographerSelected(id, currentVal) },
-                    onDownloadPhoto = { photo ->
-                        scope.launch {
-                            val file = viewModel.downloadPhotoToDevice(context, photo)
-                            if (file != null) {
-                                Toast.makeText(context, "Foto ${photo.fileName} berhasil disimpan di folder Download!", Toast.LENGTH_LONG).show()
-                            } else {
-                                Toast.makeText(context, "Gagal mengunduh foto", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    },
                     onOpenAddSession = { viewModel.openAddSessionDialog() }
                 )
             } else {
@@ -486,61 +396,12 @@ fun FotoSyncApp(
     }
 }
 
-    // Delete Confirmation Dialog for marked photos
-    if (showDeleteConfirmDialog) {
-        AlertDialog(
-            onDismissRequest = { showDeleteConfirmDialog = false },
-            containerColor = DarkroomSurface,
-            icon = {
-                Icon(
-                    imageVector = Icons.Default.Delete,
-                    contentDescription = null,
-                    tint = CrimsonHeart,
-                    modifier = Modifier.size(32.dp)
-                )
-            },
-            title = {
-                Text(
-                    text = "Hapus $photographerPickCount File dari Penyimpanan?",
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp
-                )
-            },
-            text = {
-                Text(
-                    text = "Foto yang Anda tandai akan dihapus secara permanen dari penyimpanan fisik perangkat dan sesi foto ini. Tindakan ini tidak dapat dibatalkan.",
-                    color = Color(0xFFD1D5DB),
-                    fontSize = 14.sp
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showDeleteConfirmDialog = false
-                        viewModel.deleteSelectedPhotosFromStorage(context) { count ->
-                            Toast.makeText(context, "$count file berhasil dihapus permanen dari penyimpanan!", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = CrimsonHeart),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text("Hapus Permanen", color = Color.White, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteConfirmDialog = false }) {
-                    Text("Batal", color = Color(0xFF9CA3AF))
-                }
-            }
-        )
-    }
-
     // Modal Dialogs
     if (showDownloadDialog) {
         DownloadExportDialog(
             session = activeSession,
-            allPhotos = filteredPhotos,
+            allPhotos = effectivePhotos,
+            selectedGuest = selectedGuestSummary,
             onDismiss = { showDownloadDialog = false }
         )
     }
@@ -551,15 +412,45 @@ fun FotoSyncApp(
             isServerRunning = isServerRunning,
             serverUrl = serverUrl,
             likesCount = likesNotification,
+            socialProfile = studioSocialProfile,
+            connectedGuests = sessionGuests,
+            onOpenSocialSettings = { viewModel.openSocialSettingsDialog() },
             onToggleServer = { viewModel.toggleServer() },
             onDismiss = { viewModel.closeServerDialog() }
+        )
+    }
+
+    if (showSocialSettingsDialog) {
+        StudioSocialSettingsDialog(
+            currentProfile = studioSocialProfile,
+            onSaveAccounts = { vendorName, accountsMap, lastPlatform ->
+                viewModel.saveStudioSocialAccounts(vendorName, accountsMap, lastPlatform)
+                val cleanVendor = vendorName.trim()
+                val count = accountsMap.size
+                val msg = when {
+                    count > 0 && cleanVendor.isNotEmpty() -> "$cleanVendor & $count akun sosmed disimpan!"
+                    count > 0 -> "$count akun sosmed studio disimpan!"
+                    cleanVendor.isNotEmpty() -> "Nama vendor \"$cleanVendor\" disimpan!"
+                    else -> "Pengaturan vendor & sosmed diperbarui"
+                }
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            },
+            onRemovePlatform = { platform ->
+                viewModel.removeStudioSocialPlatform(platform)
+                Toast.makeText(context, "Akun ${platform.displayName} dihapus", Toast.LENGTH_SHORT).show()
+            },
+            onClearAll = {
+                viewModel.clearStudioSocialProfile()
+                Toast.makeText(context, "Semua gerbang wajib follow dinonaktifkan", Toast.LENGTH_SHORT).show()
+            },
+            onDismiss = { viewModel.closeSocialSettingsDialog() }
         )
     }
 
     if (showBackupDialog) {
         DriveBackupDialog(
             session = activeSession,
-            allPhotos = filteredPhotos,
+            allPhotos = effectivePhotos,
             backupState = backupState,
             onConfirmBackup = { onlyLiked -> viewModel.executeGoogleDriveBackup(onlyLiked) },
             onDismiss = { viewModel.closeBackupDialog() }
@@ -580,30 +471,8 @@ fun FotoSyncApp(
         PhotoCarouselDialog(
             photos = filteredPhotos,
             initialPhotoId = selectedPhotoForDetail!!.id,
-            onDismiss = { viewModel.closePhotoDetail() },
-            onToggleClientLiked = { id, cur -> viewModel.toggleClientLiked(id, cur) },
-            onTogglePhotographerSelected = { id, cur -> viewModel.togglePhotographerSelected(id, cur) },
-            onUpdateRating = { id, rating -> viewModel.updatePhotoRating(id, rating) },
-            onDeletePhoto = { id ->
-                val targetPhoto = filteredPhotos.find { it.id == id }
-                if (targetPhoto != null) {
-                    viewModel.deletePhotoFromStorage(context, targetPhoto) {
-                        Toast.makeText(context, "Foto ${targetPhoto.fileName} dihapus dari penyimpanan", Toast.LENGTH_SHORT).show()
-                    }
-                } else {
-                    viewModel.deletePhoto(id)
-                }
-            },
-            onDownloadPhoto = { photo ->
-                scope.launch {
-                    val file = viewModel.downloadPhotoToDevice(context, photo)
-                    if (file != null) {
-                        Toast.makeText(context, "Foto ${photo.fileName} berhasil disimpan di folder Download!", Toast.LENGTH_LONG).show()
-                    } else {
-                        Toast.makeText(context, "Gagal mengunduh foto", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
+            guestLikeCountsByPhotoId = guestLikeCountsByPhotoId,
+            onDismiss = { viewModel.closePhotoDetail() }
         )
     }
 }
@@ -612,6 +481,8 @@ fun FotoSyncApp(
 fun TopStudioHeader(
     activeSession: com.example.data.model.PhotoSessionEntity?,
     isServerRunning: Boolean = false,
+    socialProfile: StudioSocialProfile = StudioSocialProfile(),
+    onOpenSocialSettings: () -> Unit,
     onOpenDownload: () -> Unit
 ) {
     Row(
@@ -682,11 +553,34 @@ fun TopStudioHeader(
             }
         }
 
-        // Right side: QR status indicator and Download button
+        // Right side: Studio Social Settings icon + Download button
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            IconButton(
+                onClick = onOpenSocialSettings,
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("top_bar_social_btn")
+            ) {
+                Box {
+                    Icon(
+                        imageVector = Icons.Default.Public,
+                        contentDescription = "Atur Vendor & Sosmed Studio",
+                        tint = if (socialProfile.hasAnyIdentityOrSocial) StudioGold else Color(0xFF9CA3AF),
+                        modifier = Modifier.size(22.dp)
+                    )
+                    if (socialProfile.isConfigured) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .align(Alignment.TopEnd)
+                                .background(Color(0xFF10B981), CircleShape)
+                        )
+                    }
+                }
+            }
 
             // Tombol Unduh di kanan atas
             if (activeSession != null) {
@@ -729,7 +623,7 @@ fun SpeedDialFab(
     onOpenAddSession: () -> Unit,
     onOpenServer: () -> Unit,
     onOpenDownload: () -> Unit,
-    onSelectStorageFolder: () -> Unit,
+    onOpenSocialSettings: () -> Unit,
     onImportPhotos: () -> Unit
 ) {
     val rotation by animateFloatAsState(
@@ -751,7 +645,7 @@ fun SpeedDialFab(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
 
-                // 3. Impor Foto (tersedia jika ada sesi aktif)
+                // Impor Foto (tersedia jika ada sesi aktif)
                 if (hasActiveSession) {
                     SpeedDialActionItem(
                         label = "Impor Foto ke Sesi",
@@ -762,7 +656,7 @@ fun SpeedDialFab(
                     )
                 }
 
-                // 3. Unduh & Ekspor
+                // Unduh & Ekspor
                 SpeedDialActionItem(
                     label = "Unduh & Ekspor Foto (ZIP)",
                     icon = Icons.Default.Download,
@@ -771,16 +665,16 @@ fun SpeedDialFab(
                     onClick = onOpenDownload
                 )
 
-                // 4. Folder Penyimpanan
+                // Pengaturan Sosmed & Web Studio
                 SpeedDialActionItem(
-                    label = "Jalur Penyimpanan SAF",
-                    icon = Icons.Default.Folder,
-                    containerColor = Color(0xFFD97706),
-                    testTag = "speed_dial_storage_folder",
-                    onClick = onSelectStorageFolder
+                    label = "Sosmed & Web Studio",
+                    icon = Icons.Default.Public,
+                    containerColor = Color(0xFF059669),
+                    testTag = "speed_dial_social_settings",
+                    onClick = onOpenSocialSettings
                 )
 
-                // 6. Publish Folder Sebagai Sesi Baru
+                // Publish Folder Sebagai Sesi Baru
                 SpeedDialActionItem(
                     label = "Publish Folder Baru",
                     icon = Icons.Default.CreateNewFolder,
@@ -890,18 +784,19 @@ fun PhotoGallerySection(
     activeSession: com.example.data.model.PhotoSessionEntity?,
     photos: List<com.example.data.model.PhotoItemEntity>,
     photoFilter: PhotoFilter,
-    searchQuery: String,
     totalPhotos: Int,
-    clientLikedCount: Int,
-    photographerPickCount: Int,
-    onSetFilter: (PhotoFilter) -> Unit,
-    onSearchQueryChanged: (String) -> Unit,
+    sessionGuests: List<GuestSummary> = emptyList(),
+    selectedGuestKey: String? = null,
+    guestLikeCountsByPhotoId: Map<String, Int> = emptyMap(),
+    onSelectMainFilter: (PhotoFilter) -> Unit,
+    onToggleGuestChip: (String) -> Unit = {},
     onPhotoClick: (com.example.data.model.PhotoItemEntity) -> Unit,
-    onToggleClientLike: (String, Boolean) -> Unit,
-    onTogglePhotographerSelect: (String, Boolean) -> Unit,
-    onDownloadPhoto: (com.example.data.model.PhotoItemEntity) -> Unit,
     onOpenAddSession: () -> Unit
 ) {
+    val activeLikedGuests = remember(sessionGuests) {
+        sessionGuests.filter { it.likedCount > 0 }
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         if (activeSession == null) {
             Box(
@@ -944,41 +839,36 @@ fun PhotoGallerySection(
             return
         }
 
-        // Filter Chips Row (Semua, Disukai Klien, Pilihan Fotografer, Belum Direview)
+        // Single Compact Filter Row: Semua Foto, Disukai Guest (Total Unik), + IP Tamu Penyuka
         LazyRow(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(vertical = 10.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            item {
+            item(key = "filter_all") {
                 FilterChipItem(
                     label = "Semua Foto ($totalPhotos)",
-                    isSelected = photoFilter == PhotoFilter.ALL,
-                    onClick = { onSetFilter(PhotoFilter.ALL) }
+                    isSelected = photoFilter == PhotoFilter.ALL && selectedGuestKey == null,
+                    onClick = { onSelectMainFilter(PhotoFilter.ALL) }
                 )
             }
-            item {
+            item(key = "filter_liked") {
                 FilterChipItem(
-                    label = "Disukai Klien ($clientLikedCount)",
-                    isSelected = photoFilter == PhotoFilter.CLIENT_LIKED,
+                    label = "Disukai Guest",
+                    isSelected = photoFilter == PhotoFilter.CLIENT_LIKED && selectedGuestKey == null,
                     activeColor = CrimsonHeart,
-                    onClick = { onSetFilter(PhotoFilter.CLIENT_LIKED) }
+                    onClick = { onSelectMainFilter(PhotoFilter.CLIENT_LIKED) }
                 )
             }
-            item {
+            items(activeLikedGuests, key = { it.clientKey }) { guest ->
                 FilterChipItem(
-                    label = "Pilihan Fotografer ($photographerPickCount)",
-                    isSelected = photoFilter == PhotoFilter.PHOTOGRAPHER_SELECTED,
-                    activeColor = StudioGold,
-                    onClick = { onSetFilter(PhotoFilter.PHOTOGRAPHER_SELECTED) }
-                )
-            }
-            item {
-                FilterChipItem(
-                    label = "Belum Direview",
-                    isSelected = photoFilter == PhotoFilter.UNREVIEWED,
-                    onClick = { onSetFilter(PhotoFilter.UNREVIEWED) }
+                    label = "${guest.clientIp} (${guest.likedCount})",
+                    isSelected = selectedGuestKey == guest.clientKey && photoFilter == PhotoFilter.CLIENT_LIKED,
+                    activeColor = CobaltBlue,
+                    onClick = { onToggleGuestChip(guest.clientKey) }
                 )
             }
         }
@@ -1029,10 +919,8 @@ fun PhotoGallerySection(
                     items(photos, key = { it.id }) { photo ->
                         PhotoCard(
                             photo = photo,
-                            onClick = { onPhotoClick(photo) },
-                            onToggleClientLike = { onToggleClientLike(photo.id, photo.isClientLiked) },
-                            onTogglePhotographerSelect = { onTogglePhotographerSelect(photo.id, photo.isPhotographerSelected) },
-                            onDownloadPhoto = { onDownloadPhoto(photo) }
+                            guestLikeCount = guestLikeCountsByPhotoId[photo.id] ?: if (photo.isClientLiked) 1 else 0,
+                            onClick = { onPhotoClick(photo) }
                         )
                     }
                 }

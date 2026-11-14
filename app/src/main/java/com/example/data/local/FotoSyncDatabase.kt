@@ -7,6 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.data.model.ExportLogEntity
+import com.example.data.model.GuestSelectionEntity
 import com.example.data.model.PhotoItemEntity
 import com.example.data.model.PhotoSessionEntity
 
@@ -14,9 +15,10 @@ import com.example.data.model.PhotoSessionEntity
     entities = [
         PhotoSessionEntity::class,
         PhotoItemEntity::class,
-        ExportLogEntity::class
+        ExportLogEntity::class,
+        GuestSelectionEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class FotoSyncDatabase : RoomDatabase() {
@@ -32,6 +34,29 @@ abstract class FotoSyncDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS guest_selections (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        sessionId TEXT NOT NULL,
+                        photoId TEXT NOT NULL,
+                        clientKey TEXT NOT NULL,
+                        clientIp TEXT NOT NULL,
+                        deviceLabel TEXT NOT NULL,
+                        likedAt INTEGER NOT NULL,
+                        FOREIGN KEY(sessionId) REFERENCES photo_sessions(id) ON DELETE CASCADE,
+                        FOREIGN KEY(photoId) REFERENCES photo_items(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_guest_selections_sessionId ON guest_selections(sessionId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_guest_selections_photoId ON guest_selections(photoId)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_guest_selections_sessionId_photoId_clientKey ON guest_selections(sessionId, photoId, clientKey)")
+            }
+        }
+
         fun getInstance(context: Context): FotoSyncDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -39,7 +64,7 @@ abstract class FotoSyncDatabase : RoomDatabase() {
                     FotoSyncDatabase::class.java,
                     "fotosync_studio.db"
                 )
-                    .addMigrations(MIGRATION_2_3)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
                     .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance

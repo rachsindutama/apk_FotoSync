@@ -16,36 +16,33 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Photo
-import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.size.Precision
 import com.example.data.model.PhotoItemEntity
-import com.example.ui.theme.CobaltBlue
 import com.example.ui.theme.CrimsonHeart
 import com.example.ui.theme.StudioGold
 import java.io.File
@@ -53,27 +50,36 @@ import java.io.File
 @Composable
 fun PhotoCard(
     photo: PhotoItemEntity,
+    guestLikeCount: Int = if (photo.isClientLiked) 1 else 0,
     onClick: () -> Unit,
-    onToggleClientLike: () -> Unit,
-    onTogglePhotographerSelect: () -> Unit,
-    onDownloadPhoto: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val borderColor by animateColorAsState(
-        targetValue = when {
-            photo.isPhotographerSelected -> StudioGold.copy(alpha = 0.85f)
-            else -> Color(0xFF222632)
-        },
+        targetValue = if (photo.isClientLiked) CrimsonHeart.copy(alpha = 0.75f) else Color(0xFF222632),
         label = "borderColor"
     )
 
-    val imageModel: Any? = if (photo.localUri.startsWith("content://")) {
-        android.net.Uri.parse(photo.localUri)
-    } else if (photo.localUri.isNotEmpty()) {
-        val f = File(photo.localUri)
-        if (f.exists()) f else null
-    } else null
-    val hasValidFile = imageModel != null
+    val imageRequest = remember(photo.id, photo.localUri) {
+        if (photo.localUri.isEmpty()) {
+            null
+        } else {
+            val data: Any = if (photo.localUri.startsWith("content://")) {
+                android.net.Uri.parse(photo.localUri)
+            } else {
+                File(photo.localUri)
+            }
+            ImageRequest.Builder(context)
+                .data(data)
+                .size(400, 300)
+                .precision(Precision.INEXACT)
+                .allowHardware(true)
+                .crossfade(150)
+                .memoryCacheKey("thumb_${photo.id}")
+                .diskCacheKey("thumb_${photo.id}")
+                .build()
+        }
+    }
 
     Card(
         modifier = modifier
@@ -95,9 +101,9 @@ fun PhotoCard(
                     .background(Color(0xFF0D0E13)),
                 contentAlignment = Alignment.Center
             ) {
-                if (hasValidFile && imageModel != null) {
+                if (imageRequest != null) {
                     AsyncImage(
-                        model = imageModel,
+                        model = imageRequest,
                         contentDescription = photo.fileName,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
@@ -116,117 +122,59 @@ fun PhotoCard(
                     }
                 }
 
-                // Top-Left Selection Checkmark Badge
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(10.dp)
-                        .size(30.dp)
-                        .clip(CircleShape)
-                        .background(if (photo.isPhotographerSelected) StudioGold else Color(0xAA121318))
-                        .clickable(onClick = onTogglePhotographerSelect)
-                        .testTag("select_photo_${photo.id}"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Check,
-                        contentDescription = "Pilih",
-                        tint = if (photo.isPhotographerSelected) Color(0xFF121316) else Color.White,
-                        modifier = Modifier.size(15.dp)
-                    )
-                }
-
-                // Top-Right Rating Badge
-                if (photo.rating > 0) {
+                // Passive read-only badge indicating guest favorite(s) on the web portal
+                if (photo.isClientLiked) {
+                    val badgeText = if (guestLikeCount > 1) "$guestLikeCount Guest" else "Guest"
                     Row(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(10.dp)
-                            .background(Color(0xAA121318), RoundedCornerShape(8.dp))
-                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                            .background(CrimsonHeart.copy(alpha = 0.9f), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                            .testTag("guest_liked_badge_${photo.id}"),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Star,
-                            contentDescription = null,
-                            tint = StudioGold,
+                            imageVector = Icons.Default.Favorite,
+                            contentDescription = "Disukai Guest",
+                            tint = Color.White,
                             modifier = Modifier.size(12.dp)
                         )
-                        Spacer(modifier = Modifier.width(2.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "${photo.rating}",
-                            style = MaterialTheme.typography.labelSmall,
+                            text = badgeText,
                             color = Color.White,
+                            fontSize = 10.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
                 }
             }
 
-            // Professional Minimalist Footer with Ghost Icon Buttons (No Box Container Backgrounds)
-            Row(
+            // Clean Minimalist Footer (File name & size only)
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = photo.fileName,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = Color.White,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.height(1.dp))
-                    Text(
-                        text = String.format("%.1f MB • %s", photo.fileSize / (1024f * 1024f), photo.resolution),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF8C93A3),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                // Ghost Icon Buttons (Transparent background, zero box container)
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Download Ghost Icon Button
-                    IconButton(
-                        onClick = onDownloadPhoto,
-                        modifier = Modifier
-                            .size(36.dp)
-                            .testTag("quick_download_photo_${photo.id}")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Download,
-                            contentDescription = "Unduh Foto",
-                            tint = CobaltBlue,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-
-                    // Like Ghost Icon Button
-                    IconButton(
-                        onClick = onToggleClientLike,
-                        modifier = Modifier
-                            .size(36.dp)
-                            .testTag("like_button_${photo.id}")
-                    ) {
-                        Icon(
-                            imageVector = if (photo.isClientLiked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                            contentDescription = "Suka",
-                            tint = if (photo.isClientLiked) CrimsonHeart else Color(0xFF8C93A3),
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                }
+                Text(
+                    text = photo.fileName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(1.dp))
+                val sizeMb = String.format("%.1f MB", photo.fileSize / (1024f * 1024f))
+                val metaText = if (photo.resolution.isNotBlank()) "$sizeMb • ${photo.resolution}" else sizeMb
+                Text(
+                    text = metaText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF8C93A3),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
     }

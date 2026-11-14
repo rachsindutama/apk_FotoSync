@@ -14,13 +14,23 @@ import android.os.FileObserver
 import android.os.Handler
 import android.os.Looper
 import android.database.ContentObserver
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import android.util.LruCache
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.local.FotoSyncDatabase
 import com.example.data.model.ExportLogEntity
+import com.example.data.model.GuestIdentity
+import com.example.data.model.GuestSelectionEntity
+import com.example.data.model.GuestSummary
 import com.example.data.model.PhotoItemEntity
 import com.example.data.model.PhotoSessionEntity
+import com.example.data.model.SocialAccountEntry
+import com.example.data.model.SocialLinkHelper
+import com.example.data.model.SocialPlatform
+import com.example.data.model.SocialResolutionResult
+import com.example.data.model.StudioSocialProfile
 import com.example.data.repository.FotoSyncRepository
 import com.example.server.KtorLocalServer
 import com.example.server.NetworkUtils
@@ -37,10 +47,11 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.UUID
 import java.util.zip.ZipEntry
@@ -91,11 +102,158 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
         prefs.edit().putString("custom_storage_uri", uriString).apply()
     }
 
+    // Global Studio Vendor & Social / Website Follow Gate Profiles (independent per platform)
+    private val _studioSocialProfile = MutableStateFlow(loadStudioSocialProfile())
+    val studioSocialProfile: StateFlow<StudioSocialProfile> = _studioSocialProfile.asStateFlow()
+
+    private fun loadStudioSocialProfile(): StudioSocialProfile {
+        val vendorName = prefs.getString("studio_vendor_name", "")?.trim() ?: ""
+        val accounts = mutableMapOf<SocialPlatform, SocialAccountEntry>()
+        for (platform in SocialPlatform.entries) {
+            val url = prefs.getString("studio_social_${platform.name}_url", "")?.trim() ?: ""
+            val name = prefs.getString("studio_social_${platform.name}_name", "")?.trim() ?: ""
+            if (url.isNotEmpty()) {
+                accounts[platform] = SocialAccountEntry(
+                    platform = platform,
+                    socialName = name,
+                    socialUrl = url
+                )
+            }
+        }
+
+        // Migrate legacy single social entry if no per-platform entries exist yet
+        if (accounts.isEmpty()) {
+            val legacyUrl = prefs.getString("studio_social_url", "")?.trim() ?: ""
+            if (legacyUrl.isNotEmpty()) {
+                val legacyName = prefs.getString("studio_social_name", "")?.trim() ?: ""
+                val legacyPlatform = SocialPlatform.fromNameOrNull(prefs.getString("studio_social_platform", null))
+                    ?: SocialLinkHelper.detectPlatformFromUrl(legacyUrl)
+                    ?: SocialPlatform.WEBSITE
+                val entry = SocialAccountEntry(
+                    platform = legacyPlatform,
+                    socialName = legacyName,
+                    socialUrl = legacyUrl
+                )
+                accounts[legacyPlatform] = entry
+                prefs.edit()
+                    .putString("studio_social_${legacyPlatform.name}_url", entry.socialUrl)
+                    .putString("studio_social_${legacyPlatform.name}_name", entry.socialName)
+                    .putString("studio_social_last_platform", legacyPlatform.name)
+                    .remove("studio_social_platform")
+                    .remove("studio_social_name")
+                    .remove("studio_social_url")
+                    .apply()
+            }
+        }
+
+        val lastPlatform = SocialPlatform.fromNameOrNull(prefs.getString("studio_social_last_platform", null))
+            ?: SocialPlatform.entries.firstOrNull { accounts.containsKey(it) }
+            ?: SocialPlatform.INSTAGRAM
+
+        return StudioSocialProfile(
+            vendorName = vendorName,
+            accounts = accounts.toMap(),
+            lastEditedPlatform = lastPlatform
+        )
+    }
+
+    private val _showSocialSettingsDialog = MutableStateFlow(false)
+    val showSocialSettingsDialog: StateFlow<Boolean> = _showSocialSettingsDialog.asStateFlow()
+
+    fun openSocialSettingsDialog() {
+        _showSocialSettingsDialog.value = true
+    }
+
+    fun closeSocialSettingsDialog() {
+        _showSocialSettingsDialog.value = false
+    }
+
+    fun saveStudioSocialAccounts(
+        vendorName: String,
+        resolvedAccounts: Map<SocialPlatform, SocialAccountEntry>,
+        lastEditedPlatform: SocialPlatform
+    ) {
+        val cleanVendorName = vendorName.trim()
+        val editor = prefs.edit()
+        val sanitized = mutableMapOf<SocialPlatform, SocialAccountEntry>()
+
+        if (cleanVendorName.isNotEmpty()) {
+            editor.putString("studio_vendor_name", cleanVendorName)
+        } else {
+            editor.remove("studio_vendor_name")
+        }
+
+        for (platform in SocialPlatform.entries) {
+            val entry = resolvedAccounts[platform]
+            if (entry != null && entry.isConfigured) {
+                sanitized[platform] = entry
+                editor.putString("studio_social_${platform.name}_url", entry.socialUrl)
+                editor.putString("studio_social_${platform.name}_name", entry.socialName)
+            } else {
+                editor.remove("studio_social_${platform.name}_url")
+                editor.remove("studio_social_${platform.name}_name")
+            }
+        }
+
+        editor.putString("studio_social_last_platform", lastEditedPlatform.name)
+        editor.apply()
+
+        _studioSocialProfile.value = StudioSocialProfile(
+            vendorName = cleanVendorName,
+            accounts = sanitized.toMap(),
+            lastEditedPlatform = lastEditedPlatform
+        )
+        _showSocialSettingsDialog.value = false
+    }
+
+    fun removeStudioSocialPlatform(platform: SocialPlatform) {
+        prefs.edit()
+            .remove("studio_social_${platform.name}_url")
+            .remove("studio_social_${platform.name}_name")
+            .apply()
+
+        val updatedAccounts = _studioSocialProfile.value.accounts - platform
+        _studioSocialProfile.value = _studioSocialProfile.value.copy(
+            accounts = updatedAccounts,
+            lastEditedPlatform = platform
+        )
+    }
+
+    fun clearStudioSocialProfile() {
+        val editor = prefs.edit()
+        for (platform in SocialPlatform.entries) {
+            editor.remove("studio_social_${platform.name}_url")
+            editor.remove("studio_social_${platform.name}_name")
+        }
+        editor
+            .remove("studio_social_platform")
+            .remove("studio_social_name")
+            .remove("studio_social_url")
+            .remove("studio_social_last_platform")
+            .apply()
+
+        // Preserve vendorName so header branding remains active even without follow gate
+        _studioSocialProfile.value = StudioSocialProfile(
+            vendorName = _studioSocialProfile.value.vendorName
+        )
+        _showSocialSettingsDialog.value = false
+    }
+
     // Active session entity
     val activeSession: StateFlow<PhotoSessionEntity?>
 
-    // Photos for active session
-    private val rawPhotos: StateFlow<List<PhotoItemEntity>>
+    // Per-guest isolation state & reactive selectors
+    private val _connectedGuestsBySession = MutableStateFlow<Map<String, Map<String, GuestIdentity>>>(emptyMap())
+    private val _selectedGuestKey = MutableStateFlow<String?>(null)
+    val selectedGuestKey: StateFlow<String?> = _selectedGuestKey.asStateFlow()
+
+    val sessionGuestSelections: StateFlow<List<GuestSelectionEntity>>
+    val sessionGuests: StateFlow<List<GuestSummary>>
+    val guestLikeCountsByPhotoId: StateFlow<Map<String, Int>>
+
+    // Photos for active session (effectivePhotos respects selectedGuestKey)
+    val rawPhotos: StateFlow<List<PhotoItemEntity>>
+    val effectivePhotos: StateFlow<List<PhotoItemEntity>>
     val filteredPhotos: StateFlow<List<PhotoItemEntity>>
 
     // Ktor CIO Server State
@@ -146,6 +304,14 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
     private val activeFileObservers: MutableList<FileObserver> = java.util.Collections.synchronizedList(mutableListOf())
     private var activeContentObserver: ContentObserver? = null
     private val syncMutex = Mutex()
+    @Volatile
+    private var lastSyncSessionId: String? = null
+    @Volatile
+    private var lastSyncTimestampMs: Long = 0L
+
+    private val thumbCache = object : LruCache<String, ByteArray>(24 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: ByteArray): Int = value.size
+    }
 
     init {
         val database = FotoSyncDatabase.getInstance(application)
@@ -201,8 +367,93 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
             initialValue = emptyList()
         )
 
-        filteredPhotos = combine(
+        sessionGuestSelections = _activeSessionId.flatMapLatest { id ->
+            if (id == null) flowOf(emptyList())
+            else repository.getGuestSelectionsForSession(id)
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
+
+        sessionGuests = combine(
+            _activeSessionId,
+            _connectedGuestsBySession,
+            sessionGuestSelections
+        ) { sessionId, connectedMap, selections ->
+            if (sessionId == null) return@combine emptyList()
+            val connectedForSession = connectedMap[sessionId] ?: emptyMap()
+            val selectionsByKey = selections.groupBy { it.clientKey }
+            val allKeys = (connectedForSession.keys + selectionsByKey.keys).distinct()
+
+            allKeys.map { key ->
+                val connected = connectedForSession[key]
+                val guestSelections = selectionsByKey[key].orEmpty()
+                val firstSel = guestSelections.firstOrNull()
+                GuestSummary(
+                    clientKey = key,
+                    clientIp = connected?.clientIp ?: firstSel?.clientIp ?: key.substringBefore("::"),
+                    deviceLabel = connected?.deviceLabel ?: firstSel?.deviceLabel ?: "Perangkat Tamu",
+                    likedCount = guestSelections.size,
+                    isConnectedNow = connected != null
+                )
+            }.sortedWith(
+                compareByDescending<GuestSummary> { it.likedCount }
+                    .thenByDescending { it.isConnectedNow }
+                    .thenBy { it.clientIp }
+            )
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
+
+        guestLikeCountsByPhotoId = combine(
+            sessionGuestSelections,
+            _selectedGuestKey
+        ) { selections, selectedGuest ->
+            if (selectedGuest != null) {
+                selections
+                    .filter { it.clientKey == selectedGuest }
+                    .associate { it.photoId to 1 }
+            } else {
+                selections
+                    .groupBy { it.photoId }
+                    .mapValues { (_, list) -> list.distinctBy { it.clientKey }.size }
+            }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyMap()
+        )
+
+        effectivePhotos = combine(
             rawPhotos,
+            sessionGuestSelections,
+            _selectedGuestKey
+        ) { photos, selections, selectedGuest ->
+            if (selectedGuest != null) {
+                val guestLikedIds = selections
+                    .filter { it.clientKey == selectedGuest }
+                    .mapTo(HashSet()) { it.photoId }
+                photos.map { photo ->
+                    photo.copy(isClientLiked = guestLikedIds.contains(photo.id))
+                }
+            } else {
+                val allGuestLikedIds = selections.mapTo(HashSet()) { it.photoId }
+                photos.map { photo ->
+                    val liked = photo.isClientLiked || allGuestLikedIds.contains(photo.id)
+                    if (liked == photo.isClientLiked) photo else photo.copy(isClientLiked = liked)
+                }
+            }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
+
+        filteredPhotos = combine(
+            effectivePhotos,
             _photoFilter,
             _searchQuery
         ) { photos, filter, query ->
@@ -211,7 +462,7 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
                     PhotoFilter.ALL -> true
                     PhotoFilter.CLIENT_LIKED -> photo.isClientLiked
                     PhotoFilter.PHOTOGRAPHER_SELECTED -> photo.isPhotographerSelected
-                    PhotoFilter.UNREVIEWED -> !photo.isClientLiked && !photo.isPhotographerSelected
+                    PhotoFilter.UNREVIEWED -> !photo.isClientLiked
                 }
                 val matchesQuery = if (query.isBlank()) true else {
                     photo.fileName.contains(query, ignoreCase = true)
@@ -250,19 +501,75 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    private fun readPhotoThumbBytes(photoId: String, localUri: String): ByteArray? {
+        if (localUri.isEmpty()) return null
+        thumbCache.get(photoId)?.let { return it }
+
+        val contentResolver = getApplication<Application>().contentResolver
+        fun openStream() = if (localUri.startsWith("content://")) {
+            contentResolver.openInputStream(Uri.parse(localUri))
+        } else {
+            val file = File(localUri)
+            if (file.exists() && file.isFile) FileInputStream(file) else null
+        }
+
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            openStream()?.use { BitmapFactory.decodeStream(it, null, bounds) }
+
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                return readPhotoBytes(localUri)
+            }
+
+            var sampleSize = 1
+            val maxDim = 480
+            while ((bounds.outWidth / sampleSize) > maxDim * 2 || (bounds.outHeight / sampleSize) > maxDim * 2) {
+                sampleSize *= 2
+            }
+
+            val decodeOpts = BitmapFactory.Options().apply {
+                inSampleSize = sampleSize
+                inPreferredConfig = Bitmap.Config.RGB_565
+            }
+            val bitmap = openStream()?.use { BitmapFactory.decodeStream(it, null, decodeOpts) }
+                ?: return readPhotoBytes(localUri)
+
+            val bos = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 78, bos)
+            bitmap.recycle()
+            val bytes = bos.toByteArray()
+            thumbCache.put(photoId, bytes)
+            bytes
+        } catch (_: Exception) {
+            readPhotoBytes(localUri)
+        }
+    }
+
+    private fun registerGuestConnection(sessionId: String, guest: GuestIdentity) {
+        val currentMap = _connectedGuestsBySession.value
+        val sessionMap = currentMap[sessionId] ?: emptyMap()
+        val isNewGuest = !sessionMap.containsKey(guest.clientKey)
+        val updatedSessionMap = sessionMap + (guest.clientKey to guest)
+        _connectedGuestsBySession.value = currentMap + (sessionId to updatedSessionMap)
+        if (isNewGuest && guest.deviceId != "browser") {
+            _clientConnectedEvent.value = "${guest.clientIp} • ${guest.deviceLabel}"
+        }
+    }
+
     private fun setupKtorServer() {
         ktorServer = KtorLocalServer(
             scope = viewModelScope,
-            onClientConnected = { clientInfo ->
+            onClientConnected = { guest ->
+                val sessionId = _activeSessionId.value ?: return@KtorLocalServer
                 viewModelScope.launch {
-                    _clientConnectedEvent.value = clientInfo
+                    registerGuestConnection(sessionId, guest)
                 }
             },
-            onLikeToggled = { photoId, isLiked ->
-                viewModelScope.launch {
-                    repository.toggleClientLiked(photoId, isLiked)
-                    _clientLikesNotification.value += 1
-                }
+            onLikeToggled = { photoId, isLiked, guest ->
+                val sessionId = _activeSessionId.value ?: return@KtorLocalServer
+                registerGuestConnection(sessionId, guest)
+                repository.setGuestPhotoLiked(sessionId, photoId, guest, isLiked)
+                _clientLikesNotification.value += 1
             },
             sessionProvider = {
                 activeSession.value
@@ -270,9 +577,25 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
             photosProvider = {
                 rawPhotos.value
             },
+            guestLikedIdsProvider = { sessionId, guest ->
+                withContext(Dispatchers.IO) {
+                    repository.getGuestLikedPhotoIdsSync(sessionId, guest.clientKey)
+                }
+            },
+            socialProfileProvider = {
+                _studioSocialProfile.value
+            },
             photoBytesProvider = { photoId ->
-                val photo = rawPhotos.value.find { it.id == photoId }
-                if (photo != null) readPhotoBytes(photo.localUri) else null
+                withContext(Dispatchers.IO) {
+                    val photo = rawPhotos.value.find { it.id == photoId }
+                    if (photo != null) readPhotoBytes(photo.localUri) else null
+                }
+            },
+            photoThumbBytesProvider = { photoId ->
+                withContext(Dispatchers.IO) {
+                    val photo = rawPhotos.value.find { it.id == photoId }
+                    if (photo != null) readPhotoThumbBytes(photo.id, photo.localUri) else null
+                }
             }
         )
     }
@@ -302,28 +625,42 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
 
             val sessionServer = KtorLocalServer(
                 scope = viewModelScope,
-                onClientConnected = { clientInfo ->
+                onClientConnected = { guest ->
                     viewModelScope.launch {
-                        _clientConnectedEvent.value = clientInfo
+                        registerGuestConnection(sessionId, guest)
                     }
                 },
-                onLikeToggled = { photoId, isLiked ->
-                    viewModelScope.launch {
-                        repository.toggleClientLiked(photoId, isLiked)
-                        _clientLikesNotification.value += 1
-                    }
+                onLikeToggled = { photoId, isLiked, guest ->
+                    registerGuestConnection(sessionId, guest)
+                    repository.setGuestPhotoLiked(sessionId, photoId, guest, isLiked)
+                    _clientLikesNotification.value += 1
                 },
                 sessionProvider = {
-                    runBlocking(Dispatchers.IO) { repository.getSessionSync(sessionId) }
+                    withContext(Dispatchers.IO) { repository.getSessionSync(sessionId) }
                 },
                 photosProvider = {
-                    runBlocking(Dispatchers.IO) { repository.getPhotosForSessionSync(sessionId) }
+                    withContext(Dispatchers.IO) { repository.getPhotosForSessionSync(sessionId) }
+                },
+                guestLikedIdsProvider = { sid, guest ->
+                    withContext(Dispatchers.IO) {
+                        repository.getGuestLikedPhotoIdsSync(sid, guest.clientKey)
+                    }
+                },
+                socialProfileProvider = {
+                    _studioSocialProfile.value
                 },
                 photoBytesProvider = { photoId ->
-                    runBlocking(Dispatchers.IO) {
+                    withContext(Dispatchers.IO) {
                         val photos = repository.getPhotosForSessionSync(sessionId)
                         val photo = photos.find { it.id == photoId }
                         if (photo != null) readPhotoBytes(photo.localUri) else null
+                    }
+                },
+                photoThumbBytesProvider = { photoId ->
+                    withContext(Dispatchers.IO) {
+                        val photos = repository.getPhotosForSessionSync(sessionId)
+                        val photo = photos.find { it.id == photoId }
+                        if (photo != null) readPhotoThumbBytes(photo.id, photo.localUri) else null
                     }
                 }
             )
@@ -517,66 +854,158 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
 
     /**
      * Scans the published folder (per-session SAF folderUri or legacy paths) for new photos.
-     * Protected by syncMutex so concurrent lifecycle/observer triggers never insert duplicate entries.
+     * Uses a single bulk DocumentsContract ContentResolver query and batch DB inserts without
+     * per-file BitmapFactory decoding so large folders load almost instantaneously.
      */
     suspend fun syncSessionFolder(sessionId: String, silent: Boolean = true): Int = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        if (silent && sessionId == lastSyncSessionId && (now - lastSyncTimestampMs) < 2000L) {
+            return@withContext 0
+        }
+
         syncMutex.withLock {
+            val lockTime = System.currentTimeMillis()
+            if (silent && sessionId == lastSyncSessionId && (lockTime - lastSyncTimestampMs) < 2000L) {
+                return@withLock 0
+            }
+
             if (!silent) {
                 _isScanningFolder.value = true
             }
             try {
                 val session = repository.getSessionSync(sessionId) ?: return@withLock 0
                 val existingPhotos = repository.getPhotosForSessionSync(sessionId)
-                val existingPaths = existingPhotos.map { it.localUri }.toSet()
-                val existingNames = existingPhotos.map { it.fileName.lowercase() }.toSet()
-                val newPhotos = mutableListOf<PhotoItemEntity>()
+                val existingPaths = existingPhotos.mapTo(HashSet(existingPhotos.size)) { it.localUri }
+                val existingNames = existingPhotos.mapTo(HashSet(existingPhotos.size)) { it.fileName.lowercase() }
+                val batchBuffer = ArrayList<PhotoItemEntity>(40)
+                var totalAdded = 0
                 val contentResolver = getApplication<Application>().contentResolver
                 val supportedExtensions = setOf(
                     "jpg", "jpeg", "png", "webp", "dng", "heic", "heif",
                     "raw", "cr2", "cr3", "nef", "arw", "rw2", "orf"
                 )
 
-                fun scanSafDirectory(dir: androidx.documentfile.provider.DocumentFile) {
-                    val filesOnDisk = dir.listFiles()
-                    for (docFile in filesOnDisk) {
-                        if (docFile.isFile) {
-                            val fileName = docFile.name ?: "photo_${System.currentTimeMillis()}.jpg"
-                            val ext = fileName.substringAfterLast('.', "").lowercase()
-                            val isImageMime = docFile.type?.startsWith("image/") == true
-                            if (!isImageMime && ext !in supportedExtensions) continue
+                suspend fun flushBatch(force: Boolean = false) {
+                    if (batchBuffer.size >= 40 || (force && batchBuffer.isNotEmpty())) {
+                        repository.insertPhotos(batchBuffer.toList())
+                        batchBuffer.clear()
+                    }
+                }
 
-                            val fileUriStr = docFile.uri.toString()
-                            if (fileUriStr in existingPaths || fileName.lowercase() in existingNames) continue
+                suspend fun scanSafTreeFast(treeUri: Uri, targetDocUri: Uri? = null) {
+                    var usedBulkQuery = false
+                    try {
+                        val parentDocId = if (targetDocUri != null) {
+                            DocumentsContract.getDocumentId(targetDocUri)
+                        } else {
+                            DocumentsContract.getTreeDocumentId(treeUri)
+                        }
+                        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId)
+                        val projection = arrayOf(
+                            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                            DocumentsContract.Document.COLUMN_MIME_TYPE,
+                            DocumentsContract.Document.COLUMN_SIZE,
+                            DocumentsContract.Document.COLUMN_LAST_MODIFIED
+                        )
+                        contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                            usedBulkQuery = true
+                            val idCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                            val nameCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                            val mimeCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                            val sizeCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+                            val modCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
 
-                            val fileSize = docFile.length().coerceAtLeast(1024L)
-                            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                            try {
-                                contentResolver.openInputStream(docFile.uri)?.use { stream ->
-                                    BitmapFactory.decodeStream(stream, null, options)
+                            while (cursor.moveToNext()) {
+                                val docId = if (idCol != -1) cursor.getString(idCol) else null
+                                if (docId.isNullOrEmpty()) continue
+                                val mimeType = if (mimeCol != -1) cursor.getString(mimeCol) else null
+                                if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) continue
+
+                                val fileName = (if (nameCol != -1) cursor.getString(nameCol) else null)
+                                    ?: "photo_${System.currentTimeMillis()}.jpg"
+                                val ext = fileName.substringAfterLast('.', "").lowercase()
+                                val isImageMime = mimeType?.startsWith("image/") == true
+                                if (!isImageMime && ext !in supportedExtensions) continue
+
+                                val fileUriStr = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId).toString()
+                                val lowerName = fileName.lowercase()
+                                if (fileUriStr in existingPaths || lowerName in existingNames) continue
+
+                                existingPaths.add(fileUriStr)
+                                existingNames.add(lowerName)
+
+                                val fileSize = if (sizeCol != -1 && !cursor.isNull(sizeCol)) {
+                                    cursor.getLong(sizeCol).coerceAtLeast(1024L)
+                                } else {
+                                    1024L
                                 }
-                            } catch (_: Exception) {
-                                // Ignore preview decode failure for RAW
-                            }
-                            val resolution = if (options.outWidth > 0 && options.outHeight > 0) {
-                                "${options.outWidth} x ${options.outHeight}"
-                            } else {
-                                "6000 x 4000"
-                            }
+                                val capturedAt = if (modCol != -1 && !cursor.isNull(modCol)) {
+                                    cursor.getLong(modCol).takeIf { it > 0L } ?: System.currentTimeMillis()
+                                } else {
+                                    System.currentTimeMillis()
+                                }
 
-                            newPhotos.add(
-                                PhotoItemEntity(
-                                    id = UUID.randomUUID().toString(),
-                                    sessionId = sessionId,
-                                    fileName = fileName,
-                                    localUri = fileUriStr,
-                                    fileSize = fileSize,
-                                    resolution = resolution,
-                                    isClientLiked = false,
-                                    isPhotographerSelected = false,
-                                    rating = 0,
-                                    capturedAt = docFile.lastModified().takeIf { it > 0 } ?: System.currentTimeMillis()
+                                batchBuffer.add(
+                                    PhotoItemEntity(
+                                        id = UUID.randomUUID().toString(),
+                                        sessionId = sessionId,
+                                        fileName = fileName,
+                                        localUri = fileUriStr,
+                                        fileSize = fileSize,
+                                        resolution = "",
+                                        isClientLiked = false,
+                                        isPhotographerSelected = false,
+                                        rating = 0,
+                                        capturedAt = capturedAt
+                                    )
                                 )
-                            )
+                                totalAdded++
+                                flushBatch(force = false)
+                            }
+                        }
+                    } catch (_: Exception) {
+                        usedBulkQuery = false
+                    }
+
+                    if (!usedBulkQuery) {
+                        val fallbackDir = if (targetDocUri != null) {
+                            androidx.documentfile.provider.DocumentFile.fromTreeUri(getApplication(), targetDocUri)
+                        } else {
+                            androidx.documentfile.provider.DocumentFile.fromTreeUri(getApplication(), treeUri)
+                        } ?: return
+
+                        for (docFile in fallbackDir.listFiles()) {
+                            if (docFile.isFile) {
+                                val fileName = docFile.name ?: "photo_${System.currentTimeMillis()}.jpg"
+                                val ext = fileName.substringAfterLast('.', "").lowercase()
+                                val isImageMime = docFile.type?.startsWith("image/") == true
+                                if (!isImageMime && ext !in supportedExtensions) continue
+
+                                val fileUriStr = docFile.uri.toString()
+                                val lowerName = fileName.lowercase()
+                                if (fileUriStr in existingPaths || lowerName in existingNames) continue
+
+                                existingPaths.add(fileUriStr)
+                                existingNames.add(lowerName)
+
+                                batchBuffer.add(
+                                    PhotoItemEntity(
+                                        id = UUID.randomUUID().toString(),
+                                        sessionId = sessionId,
+                                        fileName = fileName,
+                                        localUri = fileUriStr,
+                                        fileSize = docFile.length().coerceAtLeast(1024L),
+                                        resolution = "",
+                                        isClientLiked = false,
+                                        isPhotographerSelected = false,
+                                        rating = 0,
+                                        capturedAt = docFile.lastModified().takeIf { it > 0 } ?: System.currentTimeMillis()
+                                    )
+                                )
+                                totalAdded++
+                                flushBatch(force = false)
+                            }
                         }
                     }
                 }
@@ -585,17 +1014,14 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
                 if (session.folderUri.isNotEmpty()) {
                     try {
                         val treeUri = Uri.parse(session.folderUri)
-                        val pickedDir = androidx.documentfile.provider.DocumentFile.fromTreeUri(getApplication(), treeUri)
-                        if (pickedDir != null && pickedDir.exists()) {
-                            scanSafDirectory(pickedDir)
-                        }
+                        scanSafTreeFast(treeUri)
+                        flushBatch(force = true)
                     } catch (e: Exception) {
                         e.printStackTrace()
                     }
-                    if (newPhotos.isNotEmpty()) {
-                        repository.insertPhotos(newPhotos)
-                    }
-                    return@withLock newPhotos.size
+                    lastSyncSessionId = sessionId
+                    lastSyncTimestampMs = System.currentTimeMillis()
+                    return@withLock totalAdded
                 }
 
                 // 2. Legacy fallback: Scan global SAF directories if configured
@@ -612,7 +1038,7 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
                                 candidateSafDirs.add(pickedDir)
                             }
                             for (dir in candidateSafDirs.distinctBy { it.uri.toString() }) {
-                                scanSafDirectory(dir)
+                                scanSafTreeFast(treeUri, dir.uri)
                             }
                         }
                     } catch (e: Exception) {
@@ -637,43 +1063,36 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
                     } ?: emptyArray()
 
                     for (file in filesOnDisk) {
-                        if (file.absolutePath in existingPaths || file.name.lowercase() in existingNames) {
+                        val lowerName = file.name.lowercase()
+                        if (file.absolutePath in existingPaths || lowerName in existingNames) {
                             continue
                         }
+                        existingPaths.add(file.absolutePath)
+                        existingNames.add(lowerName)
 
-                        val fileSize = file.length().coerceAtLeast(1024L)
-                        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                        try {
-                            BitmapFactory.decodeFile(file.absolutePath, options)
-                        } catch (_: Exception) {
-                        }
-                        val resolution = if (options.outWidth > 0 && options.outHeight > 0) {
-                            "${options.outWidth} x ${options.outHeight}"
-                        } else {
-                            "6000 x 4000"
-                        }
-
-                        newPhotos.add(
+                        batchBuffer.add(
                             PhotoItemEntity(
                                 id = UUID.randomUUID().toString(),
                                 sessionId = sessionId,
                                 fileName = file.name,
                                 localUri = file.absolutePath,
-                                fileSize = fileSize,
-                                resolution = resolution,
+                                fileSize = file.length().coerceAtLeast(1024L),
+                                resolution = "",
                                 isClientLiked = false,
                                 isPhotographerSelected = false,
                                 rating = 0,
                                 capturedAt = file.lastModified().takeIf { it > 0 } ?: System.currentTimeMillis()
                             )
                         )
+                        totalAdded++
+                        flushBatch(force = false)
                     }
                 }
 
-                if (newPhotos.isNotEmpty()) {
-                    repository.insertPhotos(newPhotos)
-                }
-                newPhotos.size
+                flushBatch(force = true)
+                lastSyncSessionId = sessionId
+                lastSyncTimestampMs = System.currentTimeMillis()
+                totalAdded
             } catch (e: Exception) {
                 e.printStackTrace()
                 0
@@ -695,7 +1114,29 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun selectSession(sessionId: String) {
+        if (_activeSessionId.value != sessionId) {
+            _selectedGuestKey.value = null
+        }
         _activeSessionId.value = sessionId
+    }
+
+    fun setSelectedGuestFilter(clientKey: String?) {
+        _selectedGuestKey.value = clientKey
+    }
+
+    fun selectFilterAndClearGuest(filter: PhotoFilter) {
+        _selectedGuestKey.value = null
+        _photoFilter.value = filter
+    }
+
+    fun toggleGuestChipFilter(clientKey: String) {
+        if (_selectedGuestKey.value == clientKey && _photoFilter.value == PhotoFilter.CLIENT_LIKED) {
+            _selectedGuestKey.value = null
+            _photoFilter.value = PhotoFilter.CLIENT_LIKED
+        } else {
+            _selectedGuestKey.value = clientKey
+            _photoFilter.value = PhotoFilter.CLIENT_LIKED
+        }
     }
 
     fun selectAllPhotographerMarked(selectAll: Boolean) {
@@ -1234,5 +1675,7 @@ class FotoSyncViewModel(application: Application) : AndroidViewModel(application
         super.onCleared()
         stopObservingSession()
         ktorServer?.stop()
+        sessionServers.values.forEach { it.stop() }
+        sessionServers.clear()
     }
 }

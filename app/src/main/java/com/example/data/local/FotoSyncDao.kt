@@ -6,6 +6,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
 import com.example.data.model.ExportLogEntity
+import com.example.data.model.GuestSelectionEntity
 import com.example.data.model.PhotoItemEntity
 import com.example.data.model.PhotoSessionEntity
 import kotlinx.coroutines.flow.Flow
@@ -67,6 +68,22 @@ interface FotoSyncDao {
 
     @Query("UPDATE photo_items SET isPhotographerSelected = :isSelected WHERE sessionId = :sessionId")
     suspend fun updateAllPhotographerSelected(sessionId: String, isSelected: Boolean)
+
+    // --- Per-Guest Selections ---
+    @Query("SELECT * FROM guest_selections WHERE sessionId = :sessionId ORDER BY likedAt DESC")
+    fun getGuestSelectionsForSession(sessionId: String): Flow<List<GuestSelectionEntity>>
+
+    @Query("SELECT photoId FROM guest_selections WHERE sessionId = :sessionId AND clientKey = :clientKey")
+    suspend fun getGuestLikedPhotoIdsSync(sessionId: String, clientKey: String): List<String>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertGuestSelection(selection: GuestSelectionEntity)
+
+    @Query("DELETE FROM guest_selections WHERE sessionId = :sessionId AND photoId = :photoId AND clientKey = :clientKey")
+    suspend fun deleteGuestSelection(sessionId: String, photoId: String, clientKey: String)
+
+    @Query("SELECT COUNT(*) FROM guest_selections WHERE photoId = :photoId")
+    suspend fun countGuestSelectionsForPhoto(photoId: String): Int
 
     // --- Counters ---
     @Query("SELECT COUNT(*) FROM photo_items WHERE sessionId = :sessionId")
