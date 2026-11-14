@@ -569,8 +569,8 @@ fun FotoSyncApp(
     if (showAddSessionDialog) {
         AddSessionDialog(
             onDismiss = { viewModel.closeAddSessionDialog() },
-            onCreateSession = { date, client, cat, notes ->
-                viewModel.createSession(date, client, cat, notes)
+            onCreateSession = { date, client, cat, notes, folderName, folderUri ->
+                viewModel.createSession(date, client, cat, notes, folderName, folderUri)
                 activeMainTab = 0
             }
         )
@@ -780,9 +780,9 @@ fun SpeedDialFab(
                     onClick = onSelectStorageFolder
                 )
 
-                // 6. Buat Sesi Baru
+                // 6. Publish Folder Sebagai Sesi Baru
                 SpeedDialActionItem(
-                    label = "Buat Sesi Baru",
+                    label = "Publish Folder Baru",
                     icon = Icons.Default.CreateNewFolder,
                     containerColor = StudioGold,
                     contentColor = Color(0xFF121316),
@@ -927,7 +927,7 @@ fun PhotoGallerySection(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Buat folder sesi berbasis tanggal pertama Anda untuk mulai sinkronisasi foto.",
+                        text = "Pilih folder foto yang sudah ada di memori perangkat untuk mulai mempublikasikan dan menyinkronkan foto.",
                         color = Color(0xFF9CA3AF),
                         fontSize = 13.sp,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -937,7 +937,7 @@ fun PhotoGallerySection(
                         colors = ButtonDefaults.buttonColors(containerColor = StudioGold),
                         shape = RoundedCornerShape(12.dp)
                     ) {
-                        Text("Buat Sesi Baru", color = Color(0xFF121316), fontWeight = FontWeight.Bold)
+                        Text("Pilih Folder & Publish", color = Color(0xFF121316), fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -1202,7 +1202,7 @@ fun SessionsListSection(
             },
             text = {
                 Text(
-                    text = "Sesi ini beserta seluruh file foto di penyimpanan fisik perangkat (${s.folderName}) akan dihapus secara permanen. Tindakan ini tidak dapat dibatalkan.",
+                    text = "Sesi ini hanya akan dihapus dari daftar FotoSync. Folder dan file foto asli di memori perangkat (${s.folderName}) tetap aman dan tidak akan dihapus.",
                     color = Color(0xFFD1D5DB),
                     fontSize = 14.sp
                 )
@@ -1217,7 +1217,7 @@ fun SessionsListSection(
                     colors = ButtonDefaults.buttonColors(containerColor = CrimsonHeart),
                     shape = RoundedCornerShape(8.dp)
                 ) {
-                    Text("Hapus Permanen", color = Color.White, fontWeight = FontWeight.Bold)
+                    Text("Hapus Sesi", color = Color.White, fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {

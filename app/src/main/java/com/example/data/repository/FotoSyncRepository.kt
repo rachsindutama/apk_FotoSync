@@ -50,16 +50,20 @@ class FotoSyncRepository(
         clientName: String,
         category: String,
         clientNotes: String = "",
-        initialPhotoCount: Int = 0
+        initialPhotoCount: Int = 0,
+        folderName: String? = null,
+        folderUri: String = ""
     ): PhotoSessionEntity = withContext(Dispatchers.IO) {
         val sanitizedClient = clientName.trim().replace("\\s+".toRegex(), "-")
         val sanitizedCategory = category.trim().replace("\\s+".toRegex(), "-")
-        val folderName = "${date}_${sanitizedClient}_${sanitizedCategory}"
+        val resolvedFolderName = folderName?.takeIf { it.isNotBlank() }
+            ?: "${date}_${sanitizedClient}_${sanitizedCategory}"
         val sessionId = UUID.randomUUID().toString()
 
         val session = PhotoSessionEntity(
             id = sessionId,
-            folderName = folderName,
+            folderName = resolvedFolderName,
+            folderUri = folderUri,
             sessionDate = date,
             clientName = clientName.trim(),
             category = category.trim(),
@@ -68,12 +72,12 @@ class FotoSyncRepository(
         )
         dao.insertSession(session)
 
-        // Generate initial real photo JPEG files for this session only if requested
-        if (initialPhotoCount > 0) {
+        // Generate initial real photo JPEG files for this session only if explicitly requested
+        if (initialPhotoCount > 0 && folderUri.isEmpty()) {
             val photos = (1..initialPhotoCount).map { idx ->
                 val numStr = String.format("%04d", idx)
                 val fileName = "DSC_${numStr}.JPG"
-                val file = createRealImageFile(folderName, fileName, category, idx)
+                val file = createRealImageFile(resolvedFolderName, fileName, category, idx)
 
                 PhotoItemEntity(
                     id = UUID.randomUUID().toString(),

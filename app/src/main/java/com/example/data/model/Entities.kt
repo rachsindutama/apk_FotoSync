@@ -11,7 +11,8 @@ import androidx.room.PrimaryKey
 @Entity(tableName = "photo_sessions")
 data class PhotoSessionEntity(
     @PrimaryKey val id: String,
-    val folderName: String, // e.g. "2026-10-15_Sarah-Wedding_Ceremony"
+    val folderName: String, // e.g. "2026-10-15_Sarah-Wedding_Ceremony" or picked folder name
+    val folderUri: String = "", // Persisted SAF tree URI for existing device folder
     val sessionDate: String, // "YYYY-MM-DD"
     val clientName: String,
     val category: String, // "Wedding", "Graduation", "Studio", "Commercial", "Event"

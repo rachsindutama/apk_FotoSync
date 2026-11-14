@@ -1,5 +1,9 @@
 package com.example.ui.components
 
+import android.content.Intent
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -9,18 +13,20 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CalendarToday
-import androidx.compose.material.icons.filled.CreateNewFolder
-import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -29,6 +35,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,10 +45,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.documentfile.provider.DocumentFile
 import com.example.ui.theme.CobaltBlue
 import com.example.ui.theme.StudioGold
 import java.text.SimpleDateFormat
@@ -51,12 +61,24 @@ import java.util.Locale
 @Composable
 fun AddSessionDialog(
     onDismiss: () -> Unit,
-    onCreateSession: (date: String, clientName: String, category: String, notes: String) -> Unit
+    onCreateSession: (
+        date: String,
+        clientName: String,
+        category: String,
+        notes: String,
+        folderName: String,
+        folderUri: String
+    ) -> Unit
 ) {
+    val context = LocalContext.current
     val today = remember {
         val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
         sdf.format(Date())
     }
+
+    var selectedFolderUri by remember { mutableStateOf<String?>(null) }
+    var selectedFolderName by remember { mutableStateOf("") }
+    var lastAutoFilledName by remember { mutableStateOf("") }
 
     var sessionDate by remember { mutableStateOf(today) }
     var clientName by remember { mutableStateOf("") }
@@ -65,10 +87,43 @@ fun AddSessionDialog(
 
     val categories = listOf("Wedding", "Graduation", "Studio", "Commercial", "Event")
 
-    val folderPreview = remember(sessionDate, clientName, selectedCategory) {
-        val sanitizedClient = if (clientName.isBlank()) "NamaKlien" else clientName.trim().replace("\\s+".toRegex(), "-")
-        "${sessionDate}_${sanitizedClient}_${selectedCategory}"
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val rwFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                context.contentResolver.takePersistableUriPermission(uri, rwFlags)
+            } catch (_: SecurityException) {
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (_: Exception) {
+                }
+            } catch (_: Exception) {
+            }
+
+            val docDir = DocumentFile.fromTreeUri(context, uri)
+            val resolvedName = docDir?.name?.takeIf { it.isNotBlank() }
+                ?: uri.lastPathSegment
+                    ?.substringAfterLast(':')
+                    ?.substringAfterLast('/')
+                    ?.takeIf { it.isNotBlank() }
+                ?: "Folder_Foto"
+
+            selectedFolderUri = uri.toString()
+            selectedFolderName = resolvedName
+
+            if (clientName.isBlank() || clientName == lastAutoFilledName) {
+                clientName = resolvedName
+                lastAutoFilledName = resolvedName
+            }
+        }
     }
+
+    val isFolderSelected = !selectedFolderUri.isNullOrEmpty() && selectedFolderName.isNotBlank()
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -86,20 +141,20 @@ fun AddSessionDialog(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.CreateNewFolder,
+                        imageVector = Icons.Default.FolderOpen,
                         contentDescription = null,
                         tint = StudioGold
                     )
                 }
                 Column {
                     Text(
-                        text = "Sesi Foto Baru",
+                        text = "Publish Folder Sesi",
                         color = Color.White,
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Folder Berbasis Tanggal (YYYY-MM-DD)",
+                        text = "Pilih folder yang sudah ada di memori perangkat",
                         color = Color(0xFF9CA3AF),
                         fontSize = 12.sp
                     )
@@ -108,40 +163,104 @@ fun AddSessionDialog(
         },
         text = {
             Column(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                // Live Folder Preview
+                // Existing Memory Folder Picker Card (Mandatory)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(Color(0xFF222630), RoundedCornerShape(12.dp))
-                        .border(1.dp, Color(0xFF2C3240), RoundedCornerShape(12.dp))
-                        .padding(12.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Folder,
-                            contentDescription = null,
-                            tint = CobaltBlue,
-                            modifier = Modifier.size(20.dp)
+                        .heightIn(min = 56.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(
+                            if (isFolderSelected) Color(0xFF064E3B).copy(alpha = 0.35f)
+                            else Color(0xFF222630)
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Column {
-                            Text(
-                                text = "Format Folder Otomatis:",
-                                color = Color(0xFF9CA3AF),
-                                fontSize = 11.sp
+                        .border(
+                            width = 1.5.dp,
+                            color = if (isFolderSelected) Color(0xFF10B981) else StudioGold.copy(alpha = 0.7f),
+                            shape = RoundedCornerShape(14.dp)
+                        )
+                        .clickable { folderPickerLauncher.launch(null) }
+                        .padding(12.dp)
+                        .testTag("pick_existing_folder_btn")
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = if (isFolderSelected) Icons.Default.CheckCircle else Icons.Default.FolderOpen,
+                                contentDescription = "Pilih Folder di Memori",
+                                tint = if (isFolderSelected) Color(0xFF34D399) else StudioGold,
+                                modifier = Modifier.size(22.dp)
                             )
-                            Text(
-                                text = folderPreview,
-                                color = StudioGold,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = if (isFolderSelected) "Folder Sumber Terpilih:" else "Pilih Folder di Memori Perangkat",
+                                    color = if (isFolderSelected) Color(0xFFA7F3D0) else Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = if (isFolderSelected) {
+                                        selectedFolderName
+                                    } else {
+                                        "Tap untuk memilih folder foto (DCIM, Pictures, SD Card)"
+                                    },
+                                    color = if (isFolderSelected) StudioGold else Color(0xFF9CA3AF),
+                                    fontSize = if (isFolderSelected) 13.sp else 11.sp,
+                                    fontWeight = if (isFolderSelected) FontWeight.Bold else FontWeight.Normal,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        if (isFolderSelected) {
+                            TextButton(
+                                onClick = { folderPickerLauncher.launch(null) },
+                                modifier = Modifier.heightIn(min = 48.dp)
+                            ) {
+                                Text(
+                                    text = "Ganti",
+                                    color = CobaltBlue,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
+
+                // Client / Session Name Input (auto-filled from picked folder name)
+                OutlinedTextField(
+                    value = clientName,
+                    onValueChange = { clientName = it },
+                    label = { Text("Nama Sesi / Klien") },
+                    placeholder = { Text("Otomatis terisi dari nama folder") },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("session_client_input"),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = StudioGold,
+                        unfocusedBorderColor = Color(0xFF2C3240),
+                        focusedLabelColor = StudioGold,
+                        unfocusedLabelColor = Color(0xFF9CA3AF),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    ),
+                    singleLine = true
+                )
 
                 // Date Input
                 OutlinedTextField(
@@ -159,27 +278,6 @@ fun AddSessionDialog(
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("session_date_input"),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = StudioGold,
-                        unfocusedBorderColor = Color(0xFF2C3240),
-                        focusedLabelColor = StudioGold,
-                        unfocusedLabelColor = Color(0xFF9CA3AF),
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White
-                    ),
-                    singleLine = true
-                )
-
-                // Client Name Input
-                OutlinedTextField(
-                    value = clientName,
-                    onValueChange = { clientName = it },
-                    label = { Text("Nama Klien / Pasangan") },
-                    placeholder = { Text("Misal: Sarah & Rian") },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("session_client_input"),
                     shape = RoundedCornerShape(12.dp),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = StudioGold,
@@ -211,7 +309,7 @@ fun AddSessionDialog(
                                     .clip(RoundedCornerShape(20.dp))
                                     .background(if (isSelected) StudioGold else Color(0xFF222630))
                                     .clickable { selectedCategory = cat }
-                                    .padding(horizontal = 14.dp, vertical = 6.dp)
+                                    .padding(horizontal = 14.dp, vertical = 8.dp)
                             ) {
                                 Text(
                                     text = cat,
@@ -247,17 +345,31 @@ fun AddSessionDialog(
         confirmButton = {
             Button(
                 onClick = {
+                    val uri = selectedFolderUri
+                    if (uri.isNullOrEmpty()) {
+                        Toast.makeText(context, "Pilih folder di memori perangkat terlebih dahulu!", Toast.LENGTH_SHORT).show()
+                        return@Button
+                    }
                     if (clientName.isNotBlank() && sessionDate.isNotBlank()) {
-                        onCreateSession(sessionDate, clientName, selectedCategory, notes)
+                        onCreateSession(
+                            sessionDate.trim(),
+                            clientName.trim(),
+                            selectedCategory,
+                            notes.trim(),
+                            selectedFolderName,
+                            uri
+                        )
                     }
                 },
-                enabled = clientName.isNotBlank() && sessionDate.isNotBlank(),
+                enabled = isFolderSelected && clientName.isNotBlank() && sessionDate.isNotBlank(),
                 colors = ButtonDefaults.buttonColors(containerColor = StudioGold),
                 shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.testTag("submit_create_session")
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("submit_create_session")
             ) {
                 Text(
-                    text = "Buat Folder Sesi",
+                    text = "Publish Folder",
                     color = Color(0xFF121316),
                     fontWeight = FontWeight.Bold
                 )
@@ -266,7 +378,8 @@ fun AddSessionDialog(
         dismissButton = {
             OutlinedButton(
                 onClick = onDismiss,
-                shape = RoundedCornerShape(12.dp)
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.heightIn(min = 48.dp)
             ) {
                 Text("Batal", color = Color(0xFF9CA3AF))
             }
